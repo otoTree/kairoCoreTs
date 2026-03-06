@@ -1,6 +1,12 @@
 import { connect, type Socket } from 'bun';
 import { Protocol, PacketType } from './protocol';
 import { EventEmitter } from 'node:events';
+import { join } from 'node:path';
+
+const DEFAULT_IPC_SOCKET_PATH =
+  process.platform === 'linux'
+    ? '/run/kairo/kernel.sock'
+    : join(process.cwd(), '.run', 'kairo', 'kernel.sock');
 
 export class IPCClient extends EventEmitter {
   private socketPath: string;
@@ -8,7 +14,7 @@ export class IPCClient extends EventEmitter {
   private buffer: Buffer = Buffer.alloc(0);
   private responseHandlers = new Map<string, (data: any) => void>();
 
-  constructor(socketPath: string = '/run/kairo/kernel.sock') {
+  constructor(socketPath: string = process.env.KAIRO_IPC_SOCKET || DEFAULT_IPC_SOCKET_PATH) {
     super();
     this.socketPath = socketPath;
   }

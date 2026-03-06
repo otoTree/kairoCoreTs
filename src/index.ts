@@ -2,7 +2,6 @@ import { Application } from "./core/app";
 import { HealthPlugin } from "./domains/health/health.plugin";
 import { DatabasePlugin } from "./domains/database/database.plugin";
 import { AIPlugin } from "./domains/ai/ai.plugin";
-import { OllamaProvider } from "./domains/ai/providers/ollama";
 import { OpenAIProvider } from "./domains/ai/providers/openai";
 import { AgentPlugin } from "./domains/agent/agent.plugin";
 import { ServerPlugin } from "./domains/server/server.plugin";
@@ -17,6 +16,7 @@ import { VaultPlugin } from "./domains/vault/vault.plugin";
 import { ObservabilityPlugin } from "./domains/observability/observability.plugin";
 import { CompositorPlugin } from "./domains/ui/compositor.plugin";
 import path from "path";
+import fs from "fs";
 
 const app = new Application();
 
@@ -31,12 +31,28 @@ async function bootstrap() {
     const DELIVERABLES_DIR = path.join(PROJECT_ROOT, "deliverables");
     const SKILLS_DIR = path.join(PROJECT_ROOT, "skills");
     const MCP_DIR = path.join(PROJECT_ROOT, "mcp");
+    const fallbackRuntimeDir = path.join(PROJECT_ROOT, ".run", "kairo");
+    let runtimeDir = process.env.KAIRO_RUNTIME_DIR || (process.platform === "linux" ? "/run/kairo" : fallbackRuntimeDir);
+
+    try {
+      fs.mkdirSync(runtimeDir, { recursive: true });
+    } catch (error) {
+      runtimeDir = fallbackRuntimeDir;
+      fs.mkdirSync(runtimeDir, { recursive: true });
+    }
+
+    const IPC_SOCKET_PATH = process.env.KAIRO_IPC_SOCKET || path.join(runtimeDir, "kernel.sock");
+    const TOKEN_FILE_PATH = process.env.KAIRO_WS_TOKEN_FILE || path.join(runtimeDir, "ws.token");
+    process.env.KAIRO_RUNTIME_DIR = runtimeDir;
+    process.env.KAIRO_IPC_SOCKET = IPC_SOCKET_PATH;
+    process.env.KAIRO_WS_TOKEN_FILE = TOKEN_FILE_PATH;
 
     console.log("[Config] Python Env:", PYTHON_ENV_DIR);
     console.log("[Config] Workspace:", WORKSPACE_DIR);
     console.log("[Config] Deliverables:", DELIVERABLES_DIR);
     console.log("[Config] Skills:", SKILLS_DIR);
     console.log("[Config] MCP:", MCP_DIR);
+    console.log("[Config] Runtime:", runtimeDir);
 
     // Register plugins
     await app.use(new DatabasePlugin());
@@ -56,21 +72,7 @@ async function bootstrap() {
      apiKey: process.env.OPENAI_API_KEY,
     });
     
-    // Check if separate embedding configuration is provided
     const providers = [openai];
-    const embeddingBaseUrl = process.env.OPENAI_EMBEDDING_BASE_URL;
-    const embeddingApiKey = process.env.OPENAI_EMBEDDING_API_KEY || process.env.OPENAI_API_KEY; // Fallback to main key if not specific
-
-    if (embeddingBaseUrl) {
-        const embeddingProvider = new OpenAIProvider({
-            name: "openai-embedding",
-            baseUrl: embeddingBaseUrl,
-            apiKey: embeddingApiKey,
-            defaultEmbeddingModel: process.env.OPENAI_EMBEDDING_MODEL_NAME || "text-embedding-3-small"
-        });
-        providers.push(embeddingProvider);
-        console.log("[AI] Configured separate embedding provider: openai-embedding");
-    }
 
     await app.use(new AIPlugin(providers));
 
@@ -113,9 +115,9 @@ async function bootstrap() {
 
     // 将 token 写入文件，供原生应用（如 kairo-agent-ui）读取
     try {
-      const fs = require("fs");
-      fs.writeFileSync("/run/kairo/ws.token", token, { mode: 0o600 });
-      console.log("[Server] WebSocket token 已写入 /run/kairo/ws.token");
+      fs.mkdirSync(path.dirname(TOKEN_FILE_PATH), { recursive: true });
+      fs.writeFileSync(TOKEN_FILE_PATH, token, { mode: 0o600 });
+      console.log(`[Server] WebSocket token 已写入 ${TOKEN_FILE_PATH}`);
     } catch (e) {
       console.warn("[Server] 无法写入 token 文件:", e);
     }

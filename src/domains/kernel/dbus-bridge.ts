@@ -82,6 +82,10 @@ export class DBusBridge extends EventEmitter {
    */
   async connect(eventBus: EventBus): Promise<void> {
     this.eventBus = eventBus;
+    if (process.platform !== 'linux') {
+      this.connected = false;
+      return;
+    }
 
     try {
       // 动态导入 dbus-next（仅 Linux 可用）
@@ -93,6 +97,10 @@ export class DBusBridge extends EventEmitter {
       }
 
       this.bus = dbus.systemBus();
+      this.bus.on('error', (err: unknown) => {
+        this.connected = false;
+        rootLogger.warn('[DBusBridge] D-Bus 连接错误:', { error: String(err) });
+      });
       this.connected = true;
 
       // 注册信号监听
@@ -100,7 +108,7 @@ export class DBusBridge extends EventEmitter {
 
       rootLogger.info('[DBusBridge] 已连接到系统 D-Bus');
     } catch (err) {
-      rootLogger.warn('[DBusBridge] 连接 D-Bus 失败（可能不在 Linux 环境）:', err);
+      rootLogger.warn('[DBusBridge] 连接 D-Bus 失败（可能不在 Linux 环境）:', { error: String(err) });
       this.connected = false;
     }
   }
@@ -166,7 +174,7 @@ export class DBusBridge extends EventEmitter {
         rootLogger.info('[DBusBridge] 已订阅 login1 信号');
       }
     } catch (err) {
-      rootLogger.warn('[DBusBridge] 设置信号监听失败:', err);
+      rootLogger.warn('[DBusBridge] 设置信号监听失败:', { error: String(err) });
     }
   }
 

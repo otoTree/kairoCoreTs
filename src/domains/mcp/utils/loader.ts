@@ -53,6 +53,8 @@ export async function scanLocalMcpServers(
       }
     }
   } catch (e) {
+    const err = e as NodeJS.ErrnoException;
+    if (err.code === "ENOENT") return configs;
     console.warn(`[MCP] Failed to scan directory ${mcpDir}:`, e);
   }
 

@@ -1,5 +1,6 @@
 import { listen, type Socket } from 'bun';
-import { unlink } from 'node:fs/promises';
+import { mkdir, unlink } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { Protocol, PacketType, type Packet } from './protocol';
 import type { ProcessManager } from './process-manager';
 import type { SystemMonitor } from './system-info';
@@ -8,6 +9,11 @@ import type { Vault } from '../vault/vault';
 import type { EventBus, KairoEvent } from '../events/types';
 import { StreamSubscriptionManager } from './stream-subscription';
 import { TopicSubscriptionManager } from './subscription-manager';
+
+const DEFAULT_IPC_SOCKET_PATH =
+  process.platform === 'linux'
+    ? '/run/kairo/kernel.sock'
+    : join(process.cwd(), '.run', 'kairo', 'kernel.sock');
 
 /**
  * IPC 连接身份信息
@@ -33,7 +39,7 @@ export class IPCServer {
     private systemMonitor: SystemMonitor,
     private deviceRegistry: DeviceRegistry,
     private vault?: Vault,
-    socketPath: string = '/run/kairo/kernel.sock'
+    socketPath: string = process.env.KAIRO_IPC_SOCKET || DEFAULT_IPC_SOCKET_PATH
   ) {
     this.socketPath = socketPath;
     this.setupProcessEvents();
@@ -67,6 +73,7 @@ export class IPCServer {
   }
 
   async start() {
+    await mkdir(dirname(this.socketPath), { recursive: true });
     try { await unlink(this.socketPath); } catch (e) { /* 忽略 */ }
 
     this.server = listen({

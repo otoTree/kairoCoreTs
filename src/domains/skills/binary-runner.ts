@@ -3,6 +3,12 @@ import type { SandboxRuntimeConfig } from '../sandbox/sandbox-config';
 import type { Vault } from '../vault/vault';
 import { createHash } from 'crypto';
 import { readFile } from 'fs/promises';
+import { join } from 'node:path';
+
+const DEFAULT_IPC_SOCKET_PATH =
+  process.platform === 'linux'
+    ? '/run/kairo/kernel.sock'
+    : join(process.cwd(), '.run', 'kairo', 'kernel.sock');
 
 export class BinaryRunner {
   private vault?: Vault;
@@ -55,7 +61,7 @@ export class BinaryRunner {
         KAIRO_SKILL_NAME: skillName,
         KAIRO_RUNTIME_TOKEN: runtimeToken,
         KAIRO_BINARY_HASH: binaryHash,
-        KAIRO_IPC_SOCKET: env.KAIRO_IPC_SOCKET || '/run/kairo/kernel.sock',
+        KAIRO_IPC_SOCKET: env.KAIRO_IPC_SOCKET || process.env.KAIRO_IPC_SOCKET || DEFAULT_IPC_SOCKET_PATH,
         ...(context?.correlationId ? { KAIRO_CORRELATION_ID: context.correlationId } : {}),
         ...(context?.causationId ? { KAIRO_CAUSATION_ID: context.causationId } : {}),
       },
