@@ -84,45 +84,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     registerPost(this.webhookPath, async (c) => this.handleWebhook(c));
   }
 
-  registerAgentTools(registerTool: ChannelAgentToolRegistrar): void {
-    registerTool(
-      {
-        name: "kairo_feishu_send_message",
-        description: "向飞书会话主动发送消息。chatId 留空时会使用固定私聊会话。",
-        inputSchema: {
-          type: "object",
-          properties: {
-            content: { type: "string", description: "要发送的文本内容" },
-            chatId: { type: "string", description: "目标 chat_id（可选）" },
-          },
-          required: ["content"],
-        },
-      },
-      async (args: any) => {
-        const content = typeof args?.content === "string" ? args.content.trim() : "";
-        if (!content) {
-          throw new Error("content is required");
-        }
-        const chatId = this.resolveChatId(typeof args?.chatId === "string" ? args.chatId : undefined);
-        if (!chatId) {
-          throw new Error("chat_id is required");
-        }
-        await this.sendMessage(chatId, "text", {
-          text: this.normalizeDisplayText(content),
-        });
-        return {
-          status: "sent",
-          channel: "feishu",
-          chatId,
-          length: content.length,
-        };
-      },
-    );
-    console.log("[Channel:feishu] Registered agent tool", {
-      tool: "kairo_feishu_send_message",
-      fixedPrivateChatId: this.fixedPrivateChatId || null,
-    });
-  }
+  registerAgentTools(_registerTool: ChannelAgentToolRegistrar): void {}
 
   async handleEvent(event: KairoEvent): Promise<void> {
     const correlationId = event.correlationId;
@@ -592,7 +554,8 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private shouldForwardEvent(event: KairoEvent): boolean {
-    return event.type !== "kairo.intent.started" && event.type !== "kairo.intent.ended";
+    return event.type === "kairo.agent.thought"
+      || (event.type.startsWith("kairo.agent.") && event.type.endsWith(".message"));
   }
 
   private extractDirectReplyContent(event: KairoEvent): string {
