@@ -1,7 +1,7 @@
 import { createHttpProxyServer } from './http-proxy'
 import { createSocksProxyServer } from './socks-proxy'
 import type { SocksProxyWrapper } from './socks-proxy'
-import { logForDebugging } from './utils/debug'
+import { logForDebugging, emitSandboxEvent } from './utils/debug'
 import { getPlatform, type Platform } from './utils/platform'
 import * as fs from 'fs'
 import type { SandboxRuntimeConfig } from './sandbox-config'
@@ -265,6 +265,18 @@ async function initialize(
             '[Sandbox Manager] Bubblewrap not available; initializing no-bwrap isolation mode on Linux',
             { level: 'warn' },
           )
+          emitSandboxEvent({
+            type: 'kairo.system.sandbox.degraded',
+            level: 'warn',
+            message:
+              'Linux sandbox namespace isolation unavailable, downgraded to no-bwrap mode',
+            data: {
+              component: 'sandbox-manager',
+              reason: 'namespace_unavailable',
+              degradedFrom: ['pid_namespace', 'mount_namespace', 'network_namespace'],
+              degradedTo: 'env_proxy_mode',
+            },
+          })
         }
       }
 

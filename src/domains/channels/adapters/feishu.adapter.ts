@@ -9,6 +9,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   readonly name = "feishu";
   private static readonly CONTEXT_TTL_MS = 15 * 60 * 1000;
   private static readonly CONTEXT_MAX = 1000;
+  private static readonly SUPPORTED_MESSAGE_EVENT_TYPES = new Set([
+    "im.message.receive_v1",
+    "im.message.group_at_msg.receive_v1",
+  ]);
+  private static readonly SUPPORTED_ACCESS_EVENT_TYPES = new Set(["im.chat.access_event.bot_p2p_chat_entered_v1"]);
   private publishToAgent?: ChannelPublishToAgent;
   private tenantAccessToken?: string;
   private tenantTokenExpireAt = 0;
@@ -65,36 +70,35 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     registerPost(this.webhookPath, async (c) => this.handleWebhook(c));
   }
 
-  async handleAgentAction(event: KairoEvent): Promise<void> {
+  async handleEvent(event: KairoEvent): Promise<void> {
     const correlationId = event.correlationId;
     if (!correlationId) return;
     this.cleanupContexts();
     const context = this.pendingChats.get(correlationId);
     if (!context) return;
-    const action = (event.data as any)?.action;
-    if (!action || (action.type !== "say" && action.type !== "query")) {
-      console.log("[Channel:feishu] Skip non-text action", {
-        correlationId,
-        actionType: action?.type,
-      });
+    if (event.source === "client:feishu") {
       return;
     }
-    const content = typeof action.content === "string" ? action.content.trim() : "";
-    if (!content) {
-      console.log("[Channel:feishu] Skip empty action content", { correlationId });
-      return;
-    }
-
     try {
-      await this.sendTextMessage(context.chatId, content);
-      const filePaths = await this.collectExistingPaths(content);
+      const directContent = this.extractDirectReplyContent(event);
+      if (!this.shouldForwardEvent(event)) return;
+      if (directContent) {
+        await this.sendMessage(context.chatId, "text", {
+          text: this.normalizeDisplayText(directContent),
+        });
+      } else {
+        await this.sendEventMessage(context.chatId, event);
+      }
+      const actionContent = this.extractActionContent(event);
+      const filePaths = await this.collectExistingPaths(actionContent);
       for (const filePath of filePaths) {
         await this.sendFileMessage(context.chatId, filePath);
       }
       this.pendingChats.set(correlationId, { chatId: context.chatId, updatedAt: Date.now() });
     } catch (e) {
-      console.error("[Channel:feishu] Failed to send response:", {
+      console.error("[Channel:feishu] Failed to send event:", {
         correlationId,
+        eventType: event.type,
         chatId: context.chatId,
         error: e,
       });
@@ -137,8 +141,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     }
 
     const eventType = body?.header?.event_type;
-    const supportedEventTypes = new Set(["im.message.receive_v1", "im.message.group_at_msg.receive_v1"]);
-    if (body?.schema !== "2.0" || !supportedEventTypes.has(eventType)) {
+    if (body?.schema !== "2.0") {
       console.log("[Channel:feishu] Ignored event", {
         schema: body?.schema,
         eventType,
@@ -148,6 +151,19 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
     if (this.verificationToken && body?.header?.token && body.header.token !== this.verificationToken) {
       return c.json({ code: 1, msg: "invalid token" }, 401);
+    }
+
+    if (FeishuChannelAdapter.SUPPORTED_ACCESS_EVENT_TYPES.has(eventType)) {
+      await this.handleAccessEvent(body.event || {}, eventType);
+      return c.json({ code: 0, msg: "ok" });
+    }
+
+    if (!FeishuChannelAdapter.SUPPORTED_MESSAGE_EVENT_TYPES.has(eventType)) {
+      console.log("[Channel:feishu] Ignored event", {
+        schema: body?.schema,
+        eventType,
+      });
+      return c.json({ code: 0, msg: "ignored" });
     }
 
     const event = body.event || {};
@@ -193,6 +209,51 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     });
     this.rememberContext(correlationId, chatId);
     return c.json({ code: 0, msg: "ok" });
+  }
+
+  private async handleAccessEvent(event: any, eventType: string) {
+    if (!this.publishToAgent) return;
+    const chatId = event?.chat?.chat_id || event?.chat_id || event?.open_chat_id;
+    if (!chatId) {
+      console.warn("[Channel:feishu] Access event missing chat id", { eventType });
+      return;
+    }
+    const senderId = event?.operator_id?.open_id || event?.operator_id?.user_id || event?.operator_id?.union_id;
+    const senderName = event?.operator_id?.user_id || senderId;
+    const messageId = `access_${eventType}_${Date.now()}`;
+    const contentLines = [
+      "来自飞书机器人渠道的用户事件：",
+      `事件类型: ${eventType}`,
+      "用户进入了与机器人的私聊会话。",
+      `会话: ${chatId}`,
+    ];
+    if (senderName) {
+      contentLines.push(`发送者: ${senderName}`);
+    }
+
+    const correlationId = await this.publishToAgent({
+      channel: this.name,
+      source: "client:feishu",
+      targetAgentId: this.defaultAgentId,
+      sessionId: chatId,
+      messageId,
+      senderId,
+      senderName,
+      text: contentLines.join("\n"),
+      metadata: {
+        chatId,
+        eventType,
+        accessEvent: true,
+      },
+    });
+
+    console.log("[Channel:feishu] Access event published to agent", {
+      correlationId,
+      eventType,
+      chatId,
+      messageId,
+    });
+    this.rememberContext(correlationId, chatId);
   }
 
   private decryptEncryptedBody(encrypt: string) {
@@ -371,8 +432,159 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return token;
   }
 
-  private async sendTextMessage(chatId: string, text: string) {
-    await this.sendMessage(chatId, "text", { text });
+  private async sendEventMessage(chatId: string, event: KairoEvent) {
+    const post = this.buildEventPost(event);
+    await this.sendPostMessage(chatId, post.title, post.lines);
+  }
+
+  private buildEventPost(event: KairoEvent): { title: string; lines: string[] } {
+    const lines: string[] = [
+      `🧩 ${event.type}`,
+      `👤 ${event.source}`,
+      `🕒 ${this.formatEventTime(event.time)}`,
+      `🔗 ${this.formatId(event.correlationId)}`,
+    ];
+    if (event.causationId) {
+      lines.push(`↪️ ${this.formatId(event.causationId)}`);
+    }
+    const payloadLines = this.summarizeEventPayload(event);
+    if (payloadLines.length > 0) {
+      lines.push("────────");
+      lines.push(...payloadLines);
+    }
+    return {
+      title: this.getEventTitle(event.type),
+      lines,
+    };
+  }
+
+  private summarizeEventPayload(event: KairoEvent): string[] {
+    const data = event.data as any;
+    if (event.type === "kairo.agent.action") {
+      const action = data?.action || {};
+      const actionType = typeof action?.type === "string" ? action.type : "unknown";
+      const lines = [`⚡ 动作 · ${actionType}`];
+      if ((actionType === "say" || actionType === "query") && typeof action?.content === "string") {
+        lines.push("💬 内容");
+        lines.push(...this.toReadableLines(action.content, 1200).map((line) => `  ${line}`));
+      } else {
+        const raw = this.safeStringify(action, 1200);
+        if (raw) {
+          lines.push("📦 数据");
+          lines.push(...this.toReadableLines(raw, 1200).map((line) => `  ${line}`));
+        }
+      }
+      return lines;
+    }
+    if (event.type === "kairo.tool.result") {
+      const result = typeof data?.result === "string" ? data.result : this.safeStringify(data?.result, 1200);
+      const error = typeof data?.error === "string" ? data.error : this.safeStringify(data?.error, 800);
+      const lines: string[] = [];
+      if (result) {
+        lines.push("✅ 结果");
+        lines.push(...this.toReadableLines(result, 1200).map((line) => `  ${line}`));
+      }
+      if (error) {
+        lines.push("❌ 错误");
+        lines.push(...this.toReadableLines(error, 800).map((line) => `  ${line}`));
+      }
+      return lines;
+    }
+    if (event.type.startsWith("kairo.agent.") && event.type.endsWith(".message")) {
+      const text = typeof data?.content === "string" ? data.content : "";
+      if (!text) return [];
+      return ["💬 消息", ...this.toReadableLines(text, 1200).map((line) => `  ${line}`)];
+    }
+    const raw = this.safeStringify(data, 1400);
+    if (!raw) return [];
+    return ["📦 数据", ...this.toReadableLines(raw, 1400).map((line) => `  ${line}`)];
+  }
+
+  private shouldForwardEvent(event: KairoEvent): boolean {
+    return event.type !== "kairo.intent.started" && event.type !== "kairo.intent.ended";
+  }
+
+  private extractDirectReplyContent(event: KairoEvent): string {
+    if (event.type !== "kairo.agent.action") return "";
+    const action = (event.data as any)?.action;
+    if (!action || (action.type !== "say" && action.type !== "query")) return "";
+    return typeof action.content === "string" ? action.content.trim() : "";
+  }
+
+  private extractActionContent(event: KairoEvent): string {
+    if (event.type !== "kairo.agent.action") return "";
+    const action = (event.data as any)?.action;
+    if (!action || (action.type !== "say" && action.type !== "query")) return "";
+    return typeof action.content === "string" ? action.content.trim() : "";
+  }
+
+  private toReadableLines(input: string, maxLength: number): string[] {
+    const normalized = this.normalizeDisplayText(input);
+    if (!normalized) return [];
+    const lines: string[] = [];
+    for (const block of normalized.split("\n")) {
+      const trimmed = block.trim();
+      if (!trimmed) continue;
+      if (trimmed.length <= maxLength) {
+        lines.push(trimmed);
+        continue;
+      }
+      for (let i = 0; i < trimmed.length; i += maxLength) {
+        lines.push(trimmed.slice(i, i + maxLength));
+      }
+    }
+    return lines;
+  }
+
+  private normalizeDisplayText(input: string): string {
+    return input
+      .replace(/\r\n/g, "\n")
+      .replace(/^#{1,6}\s*/gm, "")
+      .replace(/\*\*(.*?)\*\*/g, "$1")
+      .replace(/\*(.*?)\*/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\[(.*?)\]\((https?:\/\/[^\s)]+)\)/g, "$1 ($2)")
+      .trim();
+  }
+
+  private getEventTitle(eventType: string): string {
+    if (eventType === "kairo.agent.thought") return "🧠 思考";
+    if (eventType === "kairo.agent.action") return "⚡ 动作";
+    if (eventType === "kairo.tool.result") return "🛠️ 工具结果";
+    if (eventType.startsWith("kairo.agent.") && eventType.endsWith(".message")) return "💬 消息";
+    return "📡 事件";
+  }
+
+  private formatEventTime(value: string): string {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  private formatId(value?: string): string {
+    if (!value) return "-";
+    if (value.length <= 8) return value;
+    return `${value.slice(0, 8)}…`;
+  }
+
+  private safeStringify(value: unknown, maxLength: number): string {
+    if (value == null) return "";
+    const rendered = typeof value === "string" ? value : JSON.stringify(value);
+    if (!rendered) return "";
+    return rendered.length > maxLength ? `${rendered.slice(0, maxLength)}...` : rendered;
+  }
+
+  private async sendPostMessage(chatId: string, title: string, lines: string[]) {
+    const rows = lines.slice(0, 30).map((line) => [{ tag: "text", text: line }]);
+    if (rows.length === 0) {
+      rows.push([{ tag: "text", text: "无详细内容" }]);
+    }
+    await this.sendMessage(chatId, "post", {
+      zh_cn: {
+        title: this.normalizeDisplayText(title).slice(0, 80),
+        content: rows,
+      },
+    });
   }
 
   private async sendFileMessage(chatId: string, filePath: string) {
@@ -380,7 +592,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     await this.sendMessage(chatId, "file", { file_key: fileKey });
   }
 
-  private async sendMessage(chatId: string, msgType: "text" | "file", content: Record<string, any>) {
+  private async sendMessage(chatId: string, msgType: "text" | "file" | "post", content: Record<string, any>) {
     const token = await this.getTenantAccessToken();
     const response = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
       method: "POST",

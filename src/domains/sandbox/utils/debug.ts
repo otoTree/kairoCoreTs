@@ -24,3 +24,30 @@ export function logForDebugging(
       console.log(`${prefix} ${message}`)
   }
 }
+
+type SandboxEventLevel = 'info' | 'warn' | 'error'
+
+export function emitSandboxEvent(params: {
+  type: string
+  message: string
+  level?: SandboxEventLevel
+  data?: Record<string, unknown>
+}): void {
+  const payload = {
+    ts: new Date().toISOString(),
+    type: params.type,
+    message: params.message,
+    ...(params.data ? { data: params.data } : {}),
+  }
+  const line = `[SandboxEvent] ${JSON.stringify(payload)}`
+  const level = params.level || 'info'
+  if (level === 'error') {
+    console.error(line)
+    return
+  }
+  if (level === 'warn') {
+    console.warn(line)
+    return
+  }
+  console.log(line)
+}

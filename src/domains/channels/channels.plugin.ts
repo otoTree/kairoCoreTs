@@ -11,7 +11,7 @@ export class ChannelsPlugin implements Plugin {
   private server?: ServerPlugin;
   private agent?: AgentPlugin;
   private adapters: ChannelAdapter[] = [];
-  private actionUnsubs: Array<() => void> = [];
+  private eventUnsub?: () => void;
   private routesRegistered = false;
 
   constructor() {
@@ -28,20 +28,22 @@ export class ChannelsPlugin implements Plugin {
     if (!this.app) return;
     this.bindServerAndRegisterRoutes();
     this.bindAgent();
-    if (!this.server || !this.agent) return;
-
-    for (const adapter of this.adapters) {
-      if (!adapter.handleAgentAction) continue;
-      const unsub = this.server.onAgentAction((event) => adapter.handleAgentAction!(event));
-      this.actionUnsubs.push(unsub);
-    }
+    if (!this.agent || this.eventUnsub) return;
+    this.eventUnsub = this.agent.globalBus.subscribe("kairo.>", (event) => {
+      for (const adapter of this.adapters) {
+        if (!adapter.handleEvent) continue;
+        void Promise.resolve(adapter.handleEvent(event)).catch((error) => {
+          console.error(`[Channels] Adapter ${adapter.name} handleEvent failed`, error);
+        });
+      }
+    });
   }
 
   stop() {
-    for (const unsub of this.actionUnsubs) {
-      unsub();
+    if (this.eventUnsub) {
+      this.eventUnsub();
+      this.eventUnsub = undefined;
     }
-    this.actionUnsubs = [];
   }
 
   private bindServerAndRegisterRoutes() {

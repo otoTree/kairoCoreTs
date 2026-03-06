@@ -1,5 +1,5 @@
 import shellquote from 'shell-quote'
-import { logForDebugging } from './utils/debug'
+import { logForDebugging, emitSandboxEvent } from './utils/debug'
 import { randomBytes } from 'node:crypto'
 import * as fs from 'fs'
 import { spawn, spawnSync } from 'node:child_process'
@@ -312,6 +312,21 @@ function wrapCommandWithSandboxLinuxNoBwrap(
       if (hasSystemdRunSync()) {
           // We handle systemd-run at the outer layer
       } else {
+          emitSandboxEvent({
+            type: 'kairo.system.sandbox.degraded',
+            level: 'warn',
+            message:
+              'Cgroup limits unavailable, downgraded to non-cgroup resource control',
+            data: {
+              component: 'linux-sandbox-utils',
+              reason: 'cgroup_unavailable',
+              requestedLimits: {
+                memory: resourceLimits.memory,
+                cpu: resourceLimits.cpu,
+              },
+              degradedTo: ['ulimit_memory_only', 'no_cpu_quota'],
+            },
+          })
           // Use ulimit
           const limits = []
           if (resourceLimits.memory) {
@@ -353,7 +368,24 @@ function wrapCommandWithSandboxLinuxNoBwrap(
 }
 
 function applySystemdRunIfPossible(command: string, limits?: ResourceLimitsConfig): string {
-    if (!limits || !hasSystemdRunSync()) return command;
+    if (!limits) return command;
+    if (!hasSystemdRunSync()) {
+        emitSandboxEvent({
+          type: 'kairo.system.sandbox.degraded',
+          level: 'warn',
+          message:
+            'systemd-run is unavailable, skipping cgroup-based resource limits',
+          data: {
+            component: 'linux-sandbox-utils',
+            reason: 'systemd_run_missing',
+            requestedLimits: {
+              memory: limits.memory,
+              cpu: limits.cpu,
+            },
+          },
+        })
+        return command
+    }
     
     const systemdArgs = ['--user', '--scope', '--quiet']
     if (limits.memory) {
@@ -662,6 +694,20 @@ export async function wrapCommandWithSandboxLinux(
         '[Sandbox Linux] Network bridge unavailable; falling back to no-bwrap isolation mode',
         { level: 'warn' },
       )
+      emitSandboxEvent({
+        type: 'kairo.system.sandbox.degraded',
+        level: 'warn',
+        message:
+          'Linux namespace isolation unavailable, downgraded to no-bwrap execution mode',
+        data: {
+          component: 'linux-sandbox-utils',
+          reason: 'namespace_unavailable',
+          missingBridge: {
+            httpSocketPath: !httpSocketPath,
+            socksSocketPath: !socksSocketPath,
+          },
+        },
+      })
       return wrapCommandWithSandboxLinuxNoBwrap({
         command,
         httpProxyPort,

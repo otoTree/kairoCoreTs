@@ -20,5 +20,5 @@ export type ChannelRouteRegistrar = (path: string, handler: (c: Context) => Resp
 export interface ChannelAdapter {
   readonly name: string;
   registerRoutes(registerPost: ChannelRouteRegistrar, publishToAgent: ChannelPublishToAgent): void;
-  handleAgentAction?(event: KairoEvent): Promise<void> | void;
+  handleEvent?(event: KairoEvent): Promise<void> | void;
 }
