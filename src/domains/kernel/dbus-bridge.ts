@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { existsSync } from 'node:fs';
 import type { EventBus } from '../events/types';
 import { rootLogger } from '../observability/logger';
 
@@ -86,9 +87,13 @@ export class DBusBridge extends EventEmitter {
       this.connected = false;
       return;
     }
+    if (!this.hasSystemBusSocket()) {
+      this.connected = false;
+      rootLogger.info('[DBusBridge] 未检测到 system bus socket，跳过 D-Bus 连接');
+      return;
+    }
 
     try {
-      // 动态导入 dbus-next（仅 Linux 可用）
       const dbus = await import('dbus-next').catch(() => null);
       if (!dbus) {
         rootLogger.warn('[DBusBridge] dbus-next 不可用，使用模拟模式');
@@ -99,11 +104,14 @@ export class DBusBridge extends EventEmitter {
       this.bus = dbus.systemBus();
       this.bus.on('error', (err: unknown) => {
         this.connected = false;
+        if (this.isSocketMissingError(err)) {
+          rootLogger.info('[DBusBridge] system bus socket 不可用，已降级禁用 D-Bus 功能');
+          return;
+        }
         rootLogger.warn('[DBusBridge] D-Bus 连接错误:', { error: String(err) });
       });
       this.connected = true;
 
-      // 注册信号监听
       await this.setupSignalListeners();
 
       rootLogger.info('[DBusBridge] 已连接到系统 D-Bus');
@@ -312,6 +320,24 @@ export class DBusBridge extends EventEmitter {
       0: 'unknown', 1: 'none', 2: 'portal', 3: 'limited', 4: 'full',
     };
     return map[value] || 'unknown';
+  }
+
+  private hasSystemBusSocket(): boolean {
+    const address = process.env.DBUS_SYSTEM_BUS_ADDRESS;
+    if (address) {
+      const pathMatch = address.match(/^unix:path=([^,]+)$/);
+      if (pathMatch?.[1]) {
+        return existsSync(pathMatch[1]);
+      }
+      return true;
+    }
+    return existsSync('/var/run/dbus/system_bus_socket') || existsSync('/run/dbus/system_bus_socket');
+  }
+
+  private isSocketMissingError(err: unknown): boolean {
+    if (!err || typeof err !== 'object') return false;
+    const errno = err as NodeJS.ErrnoException;
+    return errno.code === 'ENOENT' || String(errno.message || '').includes('system_bus_socket');
   }
 
   /**

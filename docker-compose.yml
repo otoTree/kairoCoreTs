@@ -1,0 +1,23 @@
+services:
+  kairo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: kairo-core
+    env_file:
+      - .env
+    environment:
+      PYTHON_ENV_PATH: /app/.python_env
+      KAIRO_RUNTIME_DIR: /app/.run/kairo
+      KAIRO_IPC_SOCKET: /app/.run/kairo/kernel.sock
+      KAIRO_WS_TOKEN_FILE: /app/.run/kairo/ws.token
+      PORT: 3000
+    ports:
+      - "3000:3000"
+    volumes:
+      - ./workspace:/app/workspace
+      - ./deliverables:/app/deliverables
+      - ./memory:/app/memory
+      - ./data/memory:/app/data/memory
+      - ./.run:/app/.run
+    restart: unless-stopped

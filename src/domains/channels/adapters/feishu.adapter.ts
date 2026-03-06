@@ -3,6 +3,7 @@ import type { KairoEvent } from "../../events/types";
 import type { ChannelAdapter, ChannelPublishToAgent, ChannelRouteRegistrar } from "../types";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
+import { createDecipheriv } from "node:crypto";
 
 export class FeishuChannelAdapter implements ChannelAdapter {
   readonly name = "feishu";
@@ -18,22 +19,34 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     private readonly defaultAgentId: string,
     private readonly inboxDir: string,
     private readonly maxUploadBytes: number,
-    private readonly appId: string,
-    private readonly appSecret: string,
+    private readonly appId?: string,
+    private readonly appSecret?: string,
     private readonly verificationToken?: string,
+    private readonly encryptKey?: string,
   ) {}
 
   static fromEnv(): FeishuChannelAdapter | null {
     const appId = process.env.KAIRO_FEISHU_APP_ID;
     const appSecret = process.env.KAIRO_FEISHU_APP_SECRET;
     const enabled = process.env.KAIRO_FEISHU_ENABLED === "true" || !!(appId && appSecret);
-    if (!enabled || !appId || !appSecret) return null;
+    if (!enabled) return null;
 
     const webhookPath = process.env.KAIRO_FEISHU_WEBHOOK_PATH || "/api/channels/feishu/webhook";
     const defaultAgentId = process.env.KAIRO_FEISHU_AGENT_ID || "default";
     const inboxDir = process.env.KAIRO_FEISHU_INBOX_DIR || join(process.cwd(), "workspace", "feishu-inbox");
     const maxUploadBytes = Number(process.env.KAIRO_FEISHU_MAX_UPLOAD_BYTES || 30 * 1024 * 1024);
     const verificationToken = process.env.KAIRO_FEISHU_VERIFICATION_TOKEN;
+    const encryptKey = process.env.KAIRO_FEISHU_ENCRYPT_KEY;
+    console.log("[Channel:feishu] Adapter enabled", {
+      webhookPath,
+      defaultAgentId,
+      hasAppId: !!appId,
+      hasAppSecret: !!appSecret,
+      hasVerificationToken: !!verificationToken,
+      hasEncryptKey: !!encryptKey,
+      inboxDir,
+      maxUploadBytes,
+    });
     return new FeishuChannelAdapter(
       webhookPath,
       defaultAgentId,
@@ -42,11 +55,13 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       appId,
       appSecret,
       verificationToken,
+      encryptKey,
     );
   }
 
   registerRoutes(registerPost: ChannelRouteRegistrar, publishToAgent: ChannelPublishToAgent): void {
     this.publishToAgent = publishToAgent;
+    console.log("[Channel:feishu] Registering webhook route", { path: this.webhookPath });
     registerPost(this.webhookPath, async (c) => this.handleWebhook(c));
   }
 
@@ -57,9 +72,18 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const context = this.pendingChats.get(correlationId);
     if (!context) return;
     const action = (event.data as any)?.action;
-    if (!action || (action.type !== "say" && action.type !== "query")) return;
+    if (!action || (action.type !== "say" && action.type !== "query")) {
+      console.log("[Channel:feishu] Skip non-text action", {
+        correlationId,
+        actionType: action?.type,
+      });
+      return;
+    }
     const content = typeof action.content === "string" ? action.content.trim() : "";
-    if (!content) return;
+    if (!content) {
+      console.log("[Channel:feishu] Skip empty action content", { correlationId });
+      return;
+    }
 
     try {
       await this.sendTextMessage(context.chatId, content);
@@ -69,7 +93,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       }
       this.pendingChats.set(correlationId, { chatId: context.chatId, updatedAt: Date.now() });
     } catch (e) {
-      console.error("[Channel:feishu] Failed to send response:", e);
+      console.error("[Channel:feishu] Failed to send response:", {
+        correlationId,
+        chatId: context.chatId,
+        error: e,
+      });
     }
   }
 
@@ -92,7 +120,29 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       return c.json({ challenge: body.challenge });
     }
 
-    if (body?.schema !== "2.0" || body?.header?.event_type !== "im.message.receive_v1") {
+    if (body?.encrypt) {
+      try {
+        body = this.decryptEncryptedBody(body.encrypt);
+      } catch (e) {
+        console.error("[Channel:feishu] Failed to decrypt payload", e);
+        return c.json({ code: 1, msg: "invalid encrypted payload" }, 400);
+      }
+    }
+
+    if (body?.type === "url_verification" && body?.challenge) {
+      if (this.verificationToken && body.token !== this.verificationToken) {
+        return c.json({ code: 1, msg: "invalid token" }, 401);
+      }
+      return c.json({ challenge: body.challenge });
+    }
+
+    const eventType = body?.header?.event_type;
+    const supportedEventTypes = new Set(["im.message.receive_v1", "im.message.group_at_msg.receive_v1"]);
+    if (body?.schema !== "2.0" || !supportedEventTypes.has(eventType)) {
+      console.log("[Channel:feishu] Ignored event", {
+        schema: body?.schema,
+        eventType,
+      });
       return c.json({ code: 0, msg: "ignored" });
     }
 
@@ -135,8 +185,33 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       },
     });
 
+    console.log("[Channel:feishu] Message published to agent", {
+      correlationId,
+      eventType,
+      chatId,
+      messageId,
+    });
     this.rememberContext(correlationId, chatId);
     return c.json({ code: 0, msg: "ok" });
+  }
+
+  private decryptEncryptedBody(encrypt: string) {
+    if (!this.encryptKey) {
+      throw new Error("feishu encrypt key is not configured");
+    }
+    const aesKey = Buffer.from(`${this.encryptKey}=`, "base64");
+    if (aesKey.length !== 32) {
+      throw new Error("feishu encrypt key is invalid");
+    }
+    const iv = aesKey.subarray(0, 16);
+    const decipher = createDecipheriv("aes-256-cbc", aesKey, iv);
+    let decrypted = decipher.update(encrypt, "base64", "utf8");
+    decrypted += decipher.final("utf8");
+    const parsed = JSON.parse(decrypted);
+    if (!parsed || typeof parsed !== "object") {
+      throw new Error("decrypted payload is not an object");
+    }
+    return parsed;
   }
 
   private async normalizeMessage(event: any): Promise<{ text: string; attachments: string[] }> {
@@ -271,6 +346,9 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const now = Date.now();
     if (this.tenantAccessToken && now < this.tenantTokenExpireAt - 60_000) {
       return this.tenantAccessToken;
+    }
+    if (!this.appId || !this.appSecret) {
+      throw new Error("feishu app credentials are not configured");
     }
     const response = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
       method: "POST",
