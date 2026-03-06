@@ -1,6 +1,11 @@
 import type { Context } from "hono";
 import type { KairoEvent } from "../../events/types";
-import type { ChannelAdapter, ChannelPublishToAgent, ChannelRouteRegistrar } from "../types";
+import type {
+  ChannelAdapter,
+  ChannelAgentToolRegistrar,
+  ChannelPublishToAgent,
+  ChannelRouteRegistrar,
+} from "../types";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 import { createDecipheriv } from "node:crypto";
@@ -12,8 +17,13 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private static readonly SUPPORTED_MESSAGE_EVENT_TYPES = new Set([
     "im.message.receive_v1",
     "im.message.group_at_msg.receive_v1",
+    "message",
   ]);
-  private static readonly SUPPORTED_ACCESS_EVENT_TYPES = new Set(["im.chat.access_event.bot_p2p_chat_entered_v1"]);
+  private static readonly SUPPORTED_ACCESS_EVENT_TYPES = new Set([
+    "im.chat.access_event.bot_p2p_chat_entered_v1",
+    "p2p_chat_create",
+  ]);
+  private static readonly DEFAULT_FIXED_PRIVATE_CHAT_ID = "oc_76b12d8c1476ecb5e26098c86482b8b2";
   private publishToAgent?: ChannelPublishToAgent;
   private tenantAccessToken?: string;
   private tenantTokenExpireAt = 0;
@@ -28,6 +38,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     private readonly appSecret?: string,
     private readonly verificationToken?: string,
     private readonly encryptKey?: string,
+    private readonly fixedPrivateChatId?: string,
   ) {}
 
   static fromEnv(): FeishuChannelAdapter | null {
@@ -42,6 +53,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const maxUploadBytes = Number(process.env.KAIRO_FEISHU_MAX_UPLOAD_BYTES || 30 * 1024 * 1024);
     const verificationToken = process.env.KAIRO_FEISHU_VERIFICATION_TOKEN;
     const encryptKey = process.env.KAIRO_FEISHU_ENCRYPT_KEY;
+    const fixedPrivateChatId = process.env.KAIRO_FEISHU_FIXED_CHAT_ID || FeishuChannelAdapter.DEFAULT_FIXED_PRIVATE_CHAT_ID;
     console.log("[Channel:feishu] Adapter enabled", {
       webhookPath,
       defaultAgentId,
@@ -49,6 +61,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       hasAppSecret: !!appSecret,
       hasVerificationToken: !!verificationToken,
       hasEncryptKey: !!encryptKey,
+      fixedPrivateChatId,
       inboxDir,
       maxUploadBytes,
     });
@@ -61,6 +74,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       appSecret,
       verificationToken,
       encryptKey,
+      fixedPrivateChatId,
     );
   }
 
@@ -68,6 +82,46 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     this.publishToAgent = publishToAgent;
     console.log("[Channel:feishu] Registering webhook route", { path: this.webhookPath });
     registerPost(this.webhookPath, async (c) => this.handleWebhook(c));
+  }
+
+  registerAgentTools(registerTool: ChannelAgentToolRegistrar): void {
+    registerTool(
+      {
+        name: "kairo_feishu_send_message",
+        description: "向飞书会话主动发送消息。chatId 留空时会使用固定私聊会话。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            content: { type: "string", description: "要发送的文本内容" },
+            chatId: { type: "string", description: "目标 chat_id（可选）" },
+          },
+          required: ["content"],
+        },
+      },
+      async (args: any) => {
+        const content = typeof args?.content === "string" ? args.content.trim() : "";
+        if (!content) {
+          throw new Error("content is required");
+        }
+        const chatId = this.resolveChatId(typeof args?.chatId === "string" ? args.chatId : undefined);
+        if (!chatId) {
+          throw new Error("chat_id is required");
+        }
+        await this.sendMessage(chatId, "text", {
+          text: this.normalizeDisplayText(content),
+        });
+        return {
+          status: "sent",
+          channel: "feishu",
+          chatId,
+          length: content.length,
+        };
+      },
+    );
+    console.log("[Channel:feishu] Registered agent tool", {
+      tool: "kairo_feishu_send_message",
+      fixedPrivateChatId: this.fixedPrivateChatId || null,
+    });
   }
 
   async handleEvent(event: KairoEvent): Promise<void> {
@@ -140,18 +194,42 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       return c.json({ challenge: body.challenge });
     }
 
-    const eventType = body?.header?.event_type;
-    if (body?.schema !== "2.0") {
+    const eventType = body?.header?.event_type || body?.event?.type;
+    const isSchemaV2 = body?.schema === "2.0";
+    const isLegacyEvent = body?.type === "event_callback" && typeof body?.event === "object";
+    if (!isSchemaV2 && !isLegacyEvent) {
       console.log("[Channel:feishu] Ignored event", {
         schema: body?.schema,
+        type: body?.type,
         eventType,
       });
       return c.json({ code: 0, msg: "ignored" });
     }
 
-    if (this.verificationToken && body?.header?.token && body.header.token !== this.verificationToken) {
+    const requestToken = body?.header?.token || body?.token;
+    if (this.verificationToken && requestToken && requestToken !== this.verificationToken) {
       return c.json({ code: 1, msg: "invalid token" }, 401);
     }
+
+    const event = body.event || {};
+    const message = event.message || {};
+    const sender = event.sender || {};
+    const rawChatId = message.chat_id || event?.chat_id || event?.open_chat_id || event?.chat?.chat_id;
+    const resolvedChatId = this.resolveChatId(rawChatId);
+    const messageId = message.message_id;
+    const senderId = sender.sender_id?.open_id || sender.sender_id?.user_id || sender.sender_id?.union_id;
+    const senderName = sender.sender_id?.user_id || senderId;
+
+    console.log("[Channel:feishu] Webhook event received", {
+      eventType,
+      schema: body?.schema,
+      type: body?.type,
+      rawChatId: rawChatId || null,
+      resolvedChatId: resolvedChatId || null,
+      messageId: messageId || null,
+      senderId: senderId || null,
+      senderName: senderName || null,
+    });
 
     if (FeishuChannelAdapter.SUPPORTED_ACCESS_EVENT_TYPES.has(eventType)) {
       await this.handleAccessEvent(body.event || {}, eventType);
@@ -159,31 +237,43 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     }
 
     if (!FeishuChannelAdapter.SUPPORTED_MESSAGE_EVENT_TYPES.has(eventType)) {
-      console.log("[Channel:feishu] Ignored event", {
+      console.log("[Channel:feishu] Ignored event (unsupported type)", {
         schema: body?.schema,
         eventType,
+        rawChatId: rawChatId || null,
+        resolvedChatId: resolvedChatId || null,
+        messageId: messageId || null,
+        senderId: senderId || null,
       });
       return c.json({ code: 0, msg: "ignored" });
     }
 
-    const event = body.event || {};
-    const message = event.message || {};
-    const sender = event.sender || {};
     const senderType = sender.sender_type || sender.sender_id?.sender_type;
     if (senderType === "bot") {
+      console.log("[Channel:feishu] Ignored event (bot sender)", {
+        eventType,
+        rawChatId: rawChatId || null,
+        resolvedChatId: resolvedChatId || null,
+        messageId: messageId || null,
+        senderId: senderId || null,
+      });
       return c.json({ code: 0, msg: "ignored bot message" });
     }
 
-    const chatId = message.chat_id;
-    const messageId = message.message_id;
+    const chatId = resolvedChatId;
     if (!chatId || !messageId) {
+      console.warn("[Channel:feishu] Missing message metadata", {
+        eventType,
+        rawChatId: rawChatId || null,
+        resolvedChatId: resolvedChatId || null,
+        messageId: messageId || null,
+        senderId: senderId || null,
+      });
       return c.json({ code: 1, msg: "missing message metadata" }, 400);
     }
 
     const normalized = await this.normalizeMessage(event);
     const content = this.buildPrompt(event, normalized.text, normalized.attachments);
-    const senderId = sender.sender_id?.open_id || sender.sender_id?.user_id || sender.sender_id?.union_id;
-    const senderName = sender.sender_id?.user_id || senderId;
 
     const correlationId = await this.publishToAgent({
       channel: this.name,
@@ -213,7 +303,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   private async handleAccessEvent(event: any, eventType: string) {
     if (!this.publishToAgent) return;
-    const chatId = event?.chat?.chat_id || event?.chat_id || event?.open_chat_id;
+    const chatId = this.resolveChatId(event?.chat?.chat_id || event?.chat_id || event?.open_chat_id);
     if (!chatId) {
       console.warn("[Channel:feishu] Access event missing chat id", { eventType });
       return;
@@ -438,15 +528,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private buildEventPost(event: KairoEvent): { title: string; lines: string[] } {
-    const lines: string[] = [
-      `🧩 ${event.type}`,
-      `👤 ${event.source}`,
-      `🕒 ${this.formatEventTime(event.time)}`,
-      `🔗 ${this.formatId(event.correlationId)}`,
-    ];
-    if (event.causationId) {
-      lines.push(`↪️ ${this.formatId(event.causationId)}`);
-    }
+    const lines: string[] = [];
     const payloadLines = this.summarizeEventPayload(event);
     if (payloadLines.length > 0) {
       lines.push("────────");
@@ -460,13 +542,20 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   private summarizeEventPayload(event: KairoEvent): string[] {
     const data = event.data as any;
+    if (event.type === "kairo.agent.thought") {
+      const thought = this.extractThoughtOrMessageText(data?.thought) || (typeof data?.thought === "string" ? data.thought.trim() : "");
+      if (!thought) return [];
+      return ["🧠 思考", ...this.toReadableLines(thought, 1200).map((line) => `  ${line}`)];
+    }
     if (event.type === "kairo.agent.action") {
       const action = data?.action || {};
       const actionType = typeof action?.type === "string" ? action.type : "unknown";
       const lines = [`⚡ 动作 · ${actionType}`];
       if ((actionType === "say" || actionType === "query") && typeof action?.content === "string") {
+        const extracted = this.extractThoughtOrMessageText(action.content);
+        const displayText = extracted || action.content;
         lines.push("💬 内容");
-        lines.push(...this.toReadableLines(action.content, 1200).map((line) => `  ${line}`));
+        lines.push(...this.toReadableLines(displayText, 1200).map((line) => `  ${line}`));
       } else {
         const raw = this.safeStringify(action, 1200);
         if (raw) {
@@ -493,7 +582,9 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (event.type.startsWith("kairo.agent.") && event.type.endsWith(".message")) {
       const text = typeof data?.content === "string" ? data.content : "";
       if (!text) return [];
-      return ["💬 消息", ...this.toReadableLines(text, 1200).map((line) => `  ${line}`)];
+      const extracted = this.extractThoughtOrMessageText(text);
+      const displayText = extracted || text;
+      return ["💬 消息", ...this.toReadableLines(displayText, 1200).map((line) => `  ${line}`)];
     }
     const raw = this.safeStringify(data, 1400);
     if (!raw) return [];
@@ -508,14 +599,38 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (event.type !== "kairo.agent.action") return "";
     const action = (event.data as any)?.action;
     if (!action || (action.type !== "say" && action.type !== "query")) return "";
-    return typeof action.content === "string" ? action.content.trim() : "";
+    if (typeof action.content !== "string") return "";
+    const extracted = this.extractThoughtOrMessageText(action.content);
+    return extracted || action.content.trim();
   }
 
   private extractActionContent(event: KairoEvent): string {
     if (event.type !== "kairo.agent.action") return "";
     const action = (event.data as any)?.action;
     if (!action || (action.type !== "say" && action.type !== "query")) return "";
-    return typeof action.content === "string" ? action.content.trim() : "";
+    if (typeof action.content !== "string") return "";
+    const extracted = this.extractThoughtOrMessageText(action.content);
+    return extracted || action.content.trim();
+  }
+
+  private extractThoughtOrMessageText(input: string): string {
+    const text = input.trim();
+    if (!text) return "";
+    const fromWhole = this.pickThoughtOrMessage(this.safeJsonParse(text));
+    if (fromWhole) return fromWhole;
+    const fragments = text.match(/\{[\s\S]*?\}/g) || [];
+    for (const fragment of fragments) {
+      const extracted = this.pickThoughtOrMessage(this.safeJsonParse(fragment));
+      if (extracted) return extracted;
+    }
+    return "";
+  }
+
+  private pickThoughtOrMessage(value: any): string {
+    if (!value || typeof value !== "object") return "";
+    if (typeof value.message === "string" && value.message.trim()) return value.message.trim();
+    if (typeof value.thought === "string" && value.thought.trim()) return value.thought.trim();
+    return "";
   }
 
   private toReadableLines(input: string, maxLength: number): string[] {
@@ -549,8 +664,6 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   private getEventTitle(eventType: string): string {
     if (eventType === "kairo.agent.thought") return "🧠 思考";
-    if (eventType === "kairo.agent.action") return "⚡ 动作";
-    if (eventType === "kairo.tool.result") return "🛠️ 工具结果";
     if (eventType.startsWith("kairo.agent.") && eventType.endsWith(".message")) return "💬 消息";
     return "📡 事件";
   }
@@ -650,6 +763,12 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   private safeFileName(name: string) {
     return name.replace(/[^\w.\-()\u4e00-\u9fa5]/g, "_").slice(0, 120);
+  }
+
+  private resolveChatId(eventChatId?: string): string {
+    const fixedChatId = this.fixedPrivateChatId?.trim();
+    if (fixedChatId) return fixedChatId;
+    return eventChatId?.trim() || "";
   }
 
   private async collectExistingPaths(content: string): Promise<string[]> {

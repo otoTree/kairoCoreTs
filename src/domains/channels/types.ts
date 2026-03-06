@@ -16,9 +16,14 @@ export type ChannelInboundPublishInput = {
 
 export type ChannelPublishToAgent = (input: ChannelInboundPublishInput) => Promise<string>;
 export type ChannelRouteRegistrar = (path: string, handler: (c: Context) => Response | Promise<Response>) => void;
+export type ChannelAgentToolRegistrar = (
+  definition: any,
+  handler: (args: any, context: any) => Promise<any>,
+) => void;
 
 export interface ChannelAdapter {
   readonly name: string;
   registerRoutes(registerPost: ChannelRouteRegistrar, publishToAgent: ChannelPublishToAgent): void;
+  registerAgentTools?(registerTool: ChannelAgentToolRegistrar): void;
   handleEvent?(event: KairoEvent): Promise<void> | void;
 }

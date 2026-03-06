@@ -13,6 +13,7 @@ export class ChannelsPlugin implements Plugin {
   private adapters: ChannelAdapter[] = [];
   private eventUnsub?: () => void;
   private routesRegistered = false;
+  private toolsRegistered = false;
 
   constructor() {
     this.adapters = this.createAdapters();
@@ -28,6 +29,7 @@ export class ChannelsPlugin implements Plugin {
     if (!this.app) return;
     this.bindServerAndRegisterRoutes();
     this.bindAgent();
+    this.registerAgentTools();
     if (!this.agent || this.eventUnsub) return;
     this.eventUnsub = this.agent.globalBus.subscribe("kairo.>", (event) => {
       for (const adapter of this.adapters) {
@@ -80,6 +82,15 @@ export class ChannelsPlugin implements Plugin {
     const feishu = FeishuChannelAdapter.fromEnv();
     if (feishu) adapters.push(feishu);
     return adapters;
+  }
+
+  private registerAgentTools() {
+    if (!this.agent || this.toolsRegistered) return;
+    for (const adapter of this.adapters) {
+      if (!adapter.registerAgentTools) continue;
+      adapter.registerAgentTools(this.agent.registerSystemTool.bind(this.agent));
+    }
+    this.toolsRegistered = true;
   }
 
   private async publishChannelMessage(input: ChannelInboundPublishInput): Promise<string> {
