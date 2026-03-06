@@ -26,6 +26,12 @@ describe("AgentRuntime (Event Driven)", () => {
   let runtime: AgentRuntime;
 
   beforeEach(() => {
+    (mockChat as any).mockReset?.();
+    mockChat.mockImplementation(async () => ({
+      content: JSON.stringify({ thought: "thinking...", action: { type: "noop" } }),
+      usage: { input: 0, output: 0, total: 0 }
+    }));
+
     bus = new InMemoryGlobalBus(new RingBufferEventStore());
     memory = new InMemoryAgentMemory();
     runtime = new AgentRuntime({
@@ -37,7 +43,6 @@ describe("AgentRuntime (Event Driven)", () => {
       bus,
       memory,
     });
-    mockChat.mockClear();
   });
 
   it("should respond to direct agent messages", async () => {
@@ -138,6 +143,74 @@ describe("AgentRuntime (Event Driven)", () => {
     // AI should NOT be called
     expect(mockChat).not.toHaveBeenCalled();
     
+    runtime.stop();
+  });
+
+  it("should auto-continue after say action with continue flag", async () => {
+    runtime.start();
+    const emitted: any[] = [];
+    bus.subscribe("kairo.>", (e) => {
+      emitted.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "先告知用户，然后继续执行",
+        action: { type: "say", content: "正在处理", continue: true }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "执行完成",
+        action: { type: "finish", result: "done" }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "开始任务" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 120));
+
+    expect(mockChat).toHaveBeenCalledTimes(2);
+    expect(emitted.some(e => e.type === "kairo.agent.progress")).toBe(true);
+    expect(emitted.some(e => e.type === "kairo.agent.internal.continue")).toBe(true);
+    expect(emitted.some(e => e.type === "kairo.intent.ended")).toBe(true);
+
+    runtime.stop();
+  });
+
+  it("should end intent when action type is finish", async () => {
+    runtime.start();
+    const intentEvents: any[] = [];
+    bus.subscribe("kairo.intent.*", (e) => {
+      intentEvents.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "任务完成，收尾",
+        action: { type: "finish", result: "ok" }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "结束" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    const ended = intentEvents.find(e => e.type === "kairo.intent.ended");
+    expect(ended).toBeDefined();
+    expect(ended.data.result).toBe("ok");
+
     runtime.stop();
   });
 });

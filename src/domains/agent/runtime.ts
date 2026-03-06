@@ -70,7 +70,8 @@ export class AgentRuntime {
   // 限制 pendingActions 和 eventBuffer 的最大容量，防止内存泄漏
   private static readonly MAX_PENDING_ACTIONS = 100;
   private static readonly MAX_EVENT_BUFFER = 500;
-  
+  private static readonly MAX_AUTO_CONTINUE_STREAK = 3;
+
   // Track pending actions for result correlation
   private pendingActions: Set<string> = new Set();
   // actionEventId → correlationId 映射，用于取消语义
@@ -78,6 +79,10 @@ export class AgentRuntime {
 
   // Internal event buffer to replace legacy adapter
   private eventBuffer: KairoEvent[] = [];
+
+  // 自动继续标志：用于 say 动作后自动触发下一个 Tick
+  private shouldAutoContinue: boolean = false;
+  private autoContinueStreak: number = 0;
 
   constructor(options: AgentRuntimeOptions) {
     this.id = options.id || "default";
@@ -150,6 +155,9 @@ export class AgentRuntime {
 
     // Subscribe to system events
     unsubs.push(this.bus.subscribe("kairo.system.>", this.handleEvent.bind(this)));
+
+    // 订阅内部继续事件（使用通配符匹配）
+    unsubs.push(this.bus.subscribe("kairo.agent.internal.>", this.handleEvent.bind(this)));
 
     // 订阅取消事件
     unsubs.push(this.bus.subscribe("kairo.cancel", this.handleCancel.bind(this)));
@@ -286,13 +294,13 @@ export class AgentRuntime {
     if (!this.running) return;
 
     this.isTicking = true;
-    this.hasPendingUpdate = false; 
+    this.hasPendingUpdate = false;
 
     try {
       // Drain buffer immediately to capture current state
       const eventsToProcess = [...this.eventBuffer];
       this.eventBuffer = [];
-      
+
       if (eventsToProcess.length > 0) {
         // Trace Setup
         const trigger = eventsToProcess[eventsToProcess.length - 1];
@@ -311,6 +319,24 @@ export class AgentRuntime {
       console.error("[AgentRuntime] Tick error:", error);
     } finally {
       this.isTicking = false;
+
+      // 检查是否需要自动继续
+      if (this.shouldAutoContinue) {
+        this.shouldAutoContinue = false; // 重置标志
+        this.log(`Auto-continuing after say action...`);
+
+        // 使用 setTimeout 避免同步递归，让事件循环有机会处理其他事件
+        setTimeout(() => {
+          if (this.running) {
+            // 发布内部继续事件，触发下一个 Tick
+            this.publish({
+              type: "kairo.agent.internal.continue",
+              source: "agent:" + this.id,
+              data: { reason: "auto_continue_after_say" }
+            });
+          }
+        }, 0);
+      }
     }
   }
 
@@ -417,8 +443,8 @@ export class AgentRuntime {
       let actionResult = null;
       let actionEventId: string | undefined;
 
-      if (action.type === 'say' || action.type === 'query') {
-          // ACT: Publish Action Event
+      if (action.type === 'say') {
+          // ACT: Publish Action Event (as progress, not completion)
           actionEventId = await this.publish({
               type: "kairo.agent.action",
               source: "agent:" + this.id,
@@ -426,9 +452,86 @@ export class AgentRuntime {
               correlationId,
               causationId
           });
-          actionResult = "Displayed to user";
-          
-          // MEMORIZE: Intent Ended (Immediate)
+
+          // 发布进度事件，而不是 intent.ended
+          this.publish({
+              type: "kairo.agent.progress",
+              source: "agent:" + this.id,
+              data: { message: action.content },
+              correlationId,
+              causationId: actionEventId
+          });
+
+          actionResult = "Progress reported to user";
+
+          const explicitContinue = action.continue === true;
+          const explicitStop = action.continue === false || action.final === true;
+
+          // 向后兼容：未显式声明 continue 时，仍支持基于 thought 关键词推断
+          const continueKeywords = ['然后', '接下来', '之后', '完成后', '安装后', '执行', '将', 'then', 'next', 'after', 'will'];
+          const inferredContinue = !explicitStop && action.continue === undefined && continueKeywords.some(keyword => thought.includes(keyword));
+          const shouldContinue = explicitContinue || inferredContinue;
+
+          if (shouldContinue) {
+              this.autoContinueStreak += 1;
+              if (this.autoContinueStreak > AgentRuntime.MAX_AUTO_CONTINUE_STREAK) {
+                  this.autoContinueStreak = 0;
+                  this.shouldAutoContinue = false;
+                  this.publish({
+                      type: "kairo.intent.ended",
+                      source: "agent:" + this.id,
+                      data: { error: "Auto-continue exceeded safety limit" },
+                      correlationId,
+                      causationId: actionEventId
+                  });
+              } else {
+                  // 设置自动继续标志
+                  this.shouldAutoContinue = true;
+                  this.log(`Say action detected follow-up intent, will auto-continue`);
+              }
+          } else {
+              this.autoContinueStreak = 0;
+              // 没有后续意图，正常结束
+              this.publish({
+                  type: "kairo.intent.ended",
+                  source: "agent:" + this.id,
+                  data: { result: actionResult },
+                  correlationId,
+                  causationId: actionEventId
+              });
+          }
+
+      } else if (action.type === 'query') {
+          this.autoContinueStreak = 0;
+          // query 需要等待用户输入，正常结束 intent
+          actionEventId = await this.publish({
+              type: "kairo.agent.action",
+              source: "agent:" + this.id,
+              data: { action },
+              correlationId,
+              causationId
+          });
+          actionResult = "Waiting for user input";
+
+          // MEMORIZE: Intent Ended (Waiting for user)
+          this.publish({
+              type: "kairo.intent.ended",
+              source: "agent:" + this.id,
+              data: { result: actionResult },
+              correlationId,
+              causationId: actionEventId
+          });
+
+      } else if (action.type === 'finish') {
+          this.autoContinueStreak = 0;
+          actionEventId = await this.publish({
+              type: "kairo.agent.action",
+              source: "agent:" + this.id,
+              data: { action },
+              correlationId,
+              causationId
+          });
+          actionResult = action.result ?? "Completed";
           this.publish({
               type: "kairo.intent.ended",
               source: "agent:" + this.id,
@@ -438,6 +541,7 @@ export class AgentRuntime {
           });
 
       } else if (action.type === 'render') {
+          this.autoContinueStreak = 0;
           // ACT: Publish Action Event
           actionEventId = await this.publish({
               type: "kairo.agent.action",
@@ -471,6 +575,7 @@ export class AgentRuntime {
           });
 
       } else if (action.type === 'tool_call') {
+          this.autoContinueStreak = 0;
           // Validate action structure
           if (!action.function || !action.function.name) {
               const errorMsg = "Invalid tool_call action: missing function name";
@@ -566,7 +671,15 @@ export class AgentRuntime {
               }
           }
       } else {
-        // No-op or unknown action
+        this.autoContinueStreak = 0;
+        actionResult = "No action needed";
+        this.publish({
+            type: "kairo.intent.ended",
+            source: "agent:" + this.id,
+            data: { result: actionResult },
+            correlationId,
+            causationId
+        });
       }
 
       // Update Memory
@@ -620,6 +733,15 @@ export class AgentRuntime {
     }
 
     // 4. System Events
+    if (event.type === "kairo.agent.internal.continue") {
+      return {
+        type: "system_event",
+        name: event.type,
+        payload: event.data,
+        ts: new Date(event.time).getTime()
+      };
+    }
+
     if (event.type.startsWith("kairo.system.")) {
       return {
         type: "system_event",
@@ -643,7 +765,7 @@ export class AgentRuntime {
           }
       }
 
-      const validActionTypes = ["say", "query", "render", "noop"];
+      const validActionTypes = ["say", "query", "render", "finish", "noop"];
       if (toolsContext && toolsContext.trim().length > 0) {
           validActionTypes.push("tool_call");
       }
@@ -701,13 +823,19 @@ Examples:
 To speak to the user:
 {
   "thought": "reasoning...",
-  "action": { "type": "say", "content": "message to user" }
+  "action": { "type": "say", "content": "message to user", "continue": true }
 }
 
 To ask the user a question:
 {
   "thought": "reasoning...",
   "action": { "type": "query", "content": "question to user" }
+}
+
+To explicitly finish current intent:
+{
+  "thought": "reasoning...",
+  "action": { "type": "finish", "result": "task completed" }
 }
 
 To render a UI:
