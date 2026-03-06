@@ -15,6 +15,7 @@ import { MemoryPlugin } from "./domains/memory/memory.plugin";
 import { VaultPlugin } from "./domains/vault/vault.plugin";
 import { ObservabilityPlugin } from "./domains/observability/observability.plugin";
 import { CompositorPlugin } from "./domains/ui/compositor.plugin";
+import { ChannelsPlugin } from "./domains/channels/channels.plugin";
 import path from "path";
 import fs from "fs";
 
@@ -127,6 +128,7 @@ async function bootstrap() {
       token
     );
     await app.use(server);
+    await app.use(new ChannelsPlugin());
 
 
 

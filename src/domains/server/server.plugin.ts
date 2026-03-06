@@ -2,11 +2,16 @@ import { Hono } from "hono";
 import { createBunWebSocket } from "hono/bun";
 import { serveStatic } from "hono/bun";
 import { cors } from "hono/cors";
+import type { Context } from "hono";
 import type { WSContext } from "hono/ws";
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
 import type { AgentPlugin } from "../agent/agent.plugin";
 import type { ServerWebSocket } from "bun";
+import type { KairoEvent } from "../events/types";
+
+type ServerActionListener = (event: KairoEvent) => void | Promise<void>;
+type ServerPostHandler = (c: Context) => Response | Promise<Response>;
 
 export class ServerPlugin implements Plugin {
   readonly name = "server";
@@ -18,6 +23,7 @@ export class ServerPlugin implements Plugin {
   private activeWebSockets: Set<WSContext<unknown>> = new Set();
   private server?: any;
   private token?: string;
+  private actionListeners = new Set<ServerActionListener>();
 
   constructor(port: number = 3000, token?: string) {
     this.port = port;
@@ -26,7 +32,6 @@ export class ServerPlugin implements Plugin {
     
     const { upgradeWebSocket, websocket } = createBunWebSocket<ServerWebSocket<unknown>>();
 
-    // CORS: 从环境变量读取允许的来源，默认仅允许本地开发
     const allowedOrigins = (process.env.KAIRO_CORS_ORIGINS || 'http://localhost:5173,http://localhost:3000').split(',');
     this.app.use("/*", cors({
         origin: allowedOrigins,
@@ -38,15 +43,9 @@ export class ServerPlugin implements Plugin {
     }));
 
     this.app.get("/", (c) => c.json({ status: "ok", service: "Kairo Agent" }));
-
-    // Serve static files (Frontend)
     this.app.use("/*", serveStatic({ root: "./public" }));
     
-    // SPA Fallback: Serve index.html for non-API routes that didn't match a static file
-    // Note: This matches everything, so it must be last (or rely on serveStatic failing first)
-    // But serveStatic acts as a handler. If it doesn't find a file, it calls next().
     this.app.use("*", async (c, next) => {
-        // If it's an API call that wasn't handled, return 404 (optional, but good practice)
         if (c.req.path.startsWith("/api")) {
             return next();
         }
@@ -81,11 +80,9 @@ export class ServerPlugin implements Plugin {
                     const data = JSON.parse(msg);
                     
                     if (data.type === 'user_message' || data.type === 'user_input') {
-                        // Standardize on user_message
-                        // We publish a standard KairoEvent
                         this.agent.globalBus.publish({
                             type: 'kairo.user.message',
-                            source: 'client:web', // or ws id
+                            source: 'client:web',
                             data: { 
                                 content: data.text || data.content,
                                 targetAgentId: data.agentId
@@ -118,22 +115,30 @@ export class ServerPlugin implements Plugin {
     app.registerService("server", this);
   }
 
+  registerPost(path: string, handler: ServerPostHandler) {
+    this.app.post(path, async (c) => handler(c));
+  }
+
+  onAgentAction(listener: ServerActionListener) {
+    this.actionListeners.add(listener);
+    return () => this.actionListeners.delete(listener);
+  }
+
   async start() {
     console.log("[Server] Starting Server domain...");
     
-    // Connect to Agent
     try {
         this.agent = this.coreApp?.getService<AgentPlugin>("agent");
         if (this.agent) {
             const bus = this.agent.globalBus;
 
-            // Subscribe to standard Kairo events
             bus.subscribe("kairo.agent.thought", (event) => {
                 this.broadcast(event);
             });
             
             bus.subscribe("kairo.agent.action", (event) => {
                 this.broadcast(event);
+                void this.dispatchAgentAction(event);
             });
 
             bus.subscribe("kairo.tool.result", (event) => {
@@ -145,13 +150,9 @@ export class ServerPlugin implements Plugin {
             });
 
             bus.subscribe("kairo.ui.signal", (event) => {
-                // Broadcast signals too, so multiple clients (if any) stay in sync
                 this.broadcast(event);
             });
-            
-            // Also subscribe to legacy output for compatibility if Runtime emits them?
-            // Runtime emits kairo.agent.thought, etc.
-            
+
             console.log("[Server] Connected to AgentPlugin (Event Bus)");
         }
     } catch (e) {
@@ -173,6 +174,16 @@ export class ServerPlugin implements Plugin {
     if (this.server) {
         this.server.stop();
         console.log("[Server] Stopped");
+    }
+  }
+
+  private async dispatchAgentAction(event: KairoEvent) {
+    for (const listener of this.actionListeners) {
+      try {
+        await listener(event);
+      } catch (e) {
+        console.error("[Server] Agent action listener failed:", e);
+      }
     }
   }
 
