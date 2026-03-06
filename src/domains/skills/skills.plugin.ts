@@ -20,6 +20,7 @@ export class SkillsPlugin implements Plugin {
   private binaryRunner: BinaryRunner;
   private agentPlugin?: AgentPlugin;
   private app?: Application;
+  private skillsFingerprint = "";
 
   constructor(private skillsDir: string = process.cwd()) {
     this.registry = new SkillRegistry(this.skillsDir);
@@ -51,24 +52,14 @@ export class SkillsPlugin implements Plugin {
         this.agentPlugin = app.getService<AgentPlugin>("agent");
         this.registerEquipTool();
         this.registerSearchTool();
+        this.registerRefreshTool();
     } catch (e) {
         console.warn("[Skills] AgentPlugin not available during setup. System tools might not be registered.");
     }
   }
 
   async start() {
-    await this.registry.scan();
-    console.log(`[Skills] Found ${this.registry.getAllSkills().length} skills`);
-    
-    if (this.agentPlugin) {
-        // Broadcast registered skills
-        const skills = this.registry.getAllSkills();
-        this.agentPlugin.globalBus.publish({
-            type: "kairo.skill.registered",
-            source: "system:skills",
-            data: { skills: skills.map(s => ({ name: s.name, description: s.description })) }
-        });
-    }
+    await this.refreshSkills(true);
   }
 
   private registerEquipTool() {
@@ -85,6 +76,7 @@ export class SkillsPlugin implements Plugin {
           required: ["name"]
         }
       }, async (args: any, context: any) => {
+          await this.refreshSkills();
           return await this.equipSkill(args.name, context);
       });
   }
@@ -103,8 +95,55 @@ export class SkillsPlugin implements Plugin {
           required: ["query"]
         }
       }, async (args: any) => {
+          await this.refreshSkills();
           return this.searchSkills(args.query);
       });
+  }
+
+  private registerRefreshTool() {
+      if (!this.agentPlugin) return;
+      this.agentPlugin.registerSystemTool({
+        name: "kairo_refresh_skills",
+        description: "Force refresh skills from disk and return latest count.",
+        inputSchema: {
+          type: "object" as const,
+          properties: {}
+        }
+      }, async () => {
+          const changed = await this.refreshSkills(true);
+          const count = this.registry.getAllSkills().length;
+          return changed
+              ? `Skills refreshed. ${count} skills available.`
+              : `No skill changes detected. ${count} skills available.`;
+      });
+  }
+
+  async refreshSkills(force: boolean = false): Promise<boolean> {
+      await this.registry.scan();
+      const skills = this.registry.getAllSkills();
+      const fingerprint = this.buildSkillsFingerprint(skills);
+
+      if (!force && fingerprint === this.skillsFingerprint) {
+          return false;
+      }
+
+      this.skillsFingerprint = fingerprint;
+      console.log(`[Skills] Found ${skills.length} skills`);
+      if (this.agentPlugin) {
+          await this.agentPlugin.globalBus.publish({
+              type: "kairo.skill.registered",
+              source: "system:skills",
+              data: { skills: skills.map(s => ({ name: s.name, description: s.description })) }
+          });
+      }
+      return true;
+  }
+
+  private buildSkillsFingerprint(skills: Array<{ name: string; description: string; path: string }>): string {
+      const sorted = [...skills]
+          .map((skill) => ({ name: skill.name, description: skill.description, path: skill.path }))
+          .sort((a, b) => a.name.localeCompare(b.name));
+      return JSON.stringify(sorted);
   }
 
   searchSkills(query: string) {

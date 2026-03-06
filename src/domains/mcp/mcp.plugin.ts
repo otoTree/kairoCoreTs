@@ -1,9 +1,11 @@
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
 import { MCPRegistry } from "./registry";
-import { FullMCPRouter, KeywordMCPRouter } from "./router";
+import { FullMCPRouter } from "./router";
 import type { MCPServerConfig, MCPRouter, MCPTool } from "./types";
-import { CallToolRequestSchema, CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { scanLocalMcpServers } from "./utils/loader";
+import path from "path";
 
 export class MCPPlugin implements Plugin {
   readonly name = "mcp";
@@ -11,29 +13,22 @@ export class MCPPlugin implements Plugin {
   private registry: MCPRegistry;
   private router: MCPRouter;
   private configs: MCPServerConfig[] = [];
+  private configFingerprint = "";
 
   constructor(configs: MCPServerConfig[] = [], private mcpDir?: string) {
     this.configs = configs;
     this.registry = new MCPRegistry(configs);
-    // Use FullRouter by default if few tools, or KeywordRouter if many.
-    // For now, let's use FullRouter to ensure we don't miss anything in MVP
     this.router = new FullMCPRouter(); 
-    
-    // If mcpDir is provided, we could potentially scan here or assume configs are already loaded?
-    // The current architecture loads configs *before* creating the plugin in bootstrap.
-    // However, to support dynamic reloading or lazy loading, we might want to know the dir.
+    this.configFingerprint = this.buildFingerprint(configs);
   }
 
   setRouter(router: MCPRouter) {
     this.router = router;
   }
 
-  addServer(config: MCPServerConfig) {
-    this.configs.push(config);
-    // Re-init registry or add to it? Registry takes configs in constructor.
-    // Ideally we should be able to add dynamic servers.
-    // For now, let's just connect it.
-    this.registry.connect(config);
+  async addServer(config: MCPServerConfig) {
+    this.configs = this.mergeConfig(config);
+    await this.rebuildRegistry(this.configs);
   }
 
   setup(app: Application) {
@@ -43,7 +38,11 @@ export class MCPPlugin implements Plugin {
 
   async start() {
     console.log("[MCP] Starting MCP domain...");
-    await this.registry.connectAll();
+    if (this.mcpDir) {
+      await this.refreshServersFromDisk(true);
+      return;
+    }
+    await this.rebuildRegistry(this.configs);
   }
 
   async stop() {
@@ -52,6 +51,7 @@ export class MCPPlugin implements Plugin {
   }
 
   async getRelevantTools(query: string = ""): Promise<MCPTool[]> {
+    await this.refreshServersFromDisk();
     const serverNames = await this.router.route(query, this.configs);
     const tools: MCPTool[] = [];
     
@@ -64,13 +64,7 @@ export class MCPPlugin implements Plugin {
   }
 
   async callTool(name: string, args: any) {
-    // We need to find which server has this tool.
-    // Since tool names might collide, we should ideally namespace them or track them.
-    // But MCP tools are global per server.
-    // In `getRelevantTools`, we returned tools with `serverId`.
-    // The Agent should ideally pass back the `serverId` or we have to search.
-    
-    // If the agent only gives us `name`, we search all connected servers.
+    await this.refreshServersFromDisk();
     const allTools = this.registry.getAllTools();
     const tool = allTools.find(t => t.name === name);
     
@@ -96,5 +90,51 @@ export class MCPPlugin implements Plugin {
     );
 
     return result;
+  }
+
+  async refreshServersFromDisk(force: boolean = false): Promise<boolean> {
+    if (!this.mcpDir) return false;
+
+    const baseDir = path.dirname(this.mcpDir);
+    const mcpDirName = path.basename(this.mcpDir);
+    const scanned = await scanLocalMcpServers(baseDir, mcpDirName);
+    const nextFingerprint = this.buildFingerprint(scanned);
+
+    if (!force && nextFingerprint === this.configFingerprint) {
+      return false;
+    }
+
+    this.configs = scanned;
+    this.configFingerprint = nextFingerprint;
+    await this.rebuildRegistry(scanned);
+    console.log(`[MCP] Reloaded ${scanned.length} servers from ${this.mcpDir}`);
+    return true;
+  }
+
+  private buildFingerprint(configs: MCPServerConfig[]): string {
+    const sorted = [...configs]
+      .map((config) => ({
+        name: config.name,
+        command: config.command,
+        args: config.args || [],
+        env: config.env || {},
+        disabled: Boolean(config.disabled),
+        description: config.description || "",
+        keywords: config.keywords || [],
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    return JSON.stringify(sorted);
+  }
+
+  private mergeConfig(config: MCPServerConfig): MCPServerConfig[] {
+    const filtered = this.configs.filter((item) => item.name !== config.name);
+    return [...filtered, config];
+  }
+
+  private async rebuildRegistry(configs: MCPServerConfig[]) {
+    await this.registry.disconnectAll();
+    this.registry = new MCPRegistry(configs);
+    await this.registry.connectAll();
+    this.configFingerprint = this.buildFingerprint(configs);
   }
 }

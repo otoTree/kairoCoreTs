@@ -42,6 +42,8 @@ async function bootstrap() {
       runtimeDir = fallbackRuntimeDir;
       fs.mkdirSync(runtimeDir, { recursive: true });
     }
+    fs.mkdirSync(SKILLS_DIR, { recursive: true });
+    fs.mkdirSync(MCP_DIR, { recursive: true });
 
     const IPC_SOCKET_PATH = process.env.KAIRO_IPC_SOCKET || path.join(runtimeDir, "kernel.sock");
     const TOKEN_FILE_PATH = process.env.KAIRO_WS_TOKEN_FILE || path.join(runtimeDir, "ws.token");
