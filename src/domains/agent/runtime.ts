@@ -70,7 +70,6 @@ export class AgentRuntime {
   // 限制 pendingActions 和 eventBuffer 的最大容量，防止内存泄漏
   private static readonly MAX_PENDING_ACTIONS = 100;
   private static readonly MAX_EVENT_BUFFER = 500;
-  private static readonly MAX_AUTO_CONTINUE_STREAK = 3;
 
   // Track pending actions for result correlation
   private pendingActions: Set<string> = new Set();
@@ -474,21 +473,9 @@ export class AgentRuntime {
 
           if (shouldContinue) {
               this.autoContinueStreak += 1;
-              if (this.autoContinueStreak > AgentRuntime.MAX_AUTO_CONTINUE_STREAK) {
-                  this.autoContinueStreak = 0;
-                  this.shouldAutoContinue = false;
-                  this.publish({
-                      type: "kairo.intent.ended",
-                      source: "agent:" + this.id,
-                      data: { error: "Auto-continue exceeded safety limit" },
-                      correlationId,
-                      causationId: actionEventId
-                  });
-              } else {
-                  // 设置自动继续标志
-                  this.shouldAutoContinue = true;
-                  this.log(`Say action detected follow-up intent, will auto-continue`);
-              }
+              // 设置自动继续标志
+              this.shouldAutoContinue = true;
+              this.log(`Say action detected follow-up intent, will auto-continue`);
           } else {
               this.autoContinueStreak = 0;
               // 没有后续意图，正常结束

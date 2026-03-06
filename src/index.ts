@@ -10,6 +10,7 @@ import { MCPPlugin } from "./domains/mcp/mcp.plugin";
 import { scanLocalMcpServers } from "./domains/mcp/utils/loader";
 import { SkillsPlugin } from "./domains/skills/skills.plugin";
 import { KernelPlugin } from "./domains/kernel/kernel.plugin";
+import { AsyncTaskPlugin } from "./domains/async-task/async-task.plugin";
 import { DevicePlugin } from "./domains/device/device.plugin";
 import { MemoryPlugin } from "./domains/memory/memory.plugin";
 import { VaultPlugin } from "./domains/vault/vault.plugin";
@@ -94,6 +95,9 @@ async function bootstrap() {
 
     // Setup Kernel (must be after Agent setup for service discovery in start, or just use registered service)
     await app.use(new KernelPlugin());
+
+    // Setup Async Task Domain
+    await app.use(new AsyncTaskPlugin());
 
     // Setup Device Plugin (Depends on Kernel)
     await app.use(new DevicePlugin());
