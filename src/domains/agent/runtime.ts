@@ -880,6 +880,9 @@ You must respond with a JSON object strictly. Do not include markdown code block
 - If there is no new progress, no new result, and no concrete next action, use "noop".
 - After a "say" with continue intent, your next action should be concrete progress (tool_call/render/finish). If you cannot progress, use "noop".
 - Use "say" only when you have new information for the user.
+- For any file-writing task, do not attempt to write a long file in one shot.
+- Always write files in multiple chunks across multiple tool calls when content is long.
+- Start with initial content and then append remaining chunks step by step.
 - For file paths and cwd, use absolute paths under Workspace unless user specifies otherwise.
 - Directory responsibilities:
   - SkillsDir stores skill definitions and related skill resources.

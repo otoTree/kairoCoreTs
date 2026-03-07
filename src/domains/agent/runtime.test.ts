@@ -103,6 +103,27 @@ describe("AgentRuntime (Event Driven)", () => {
     }
   });
 
+  it("should include chunked file writing policy in system prompt", async () => {
+    runtime.start();
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "请写入一个文件" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 60));
+
+    expect(mockChat).toHaveBeenCalled();
+    const calls = mockChat.mock.calls as unknown as any[][];
+    const prompt = calls[calls.length - 1]![0] as any[];
+    const systemMessage = prompt.find((p: any) => p.role === "system").content;
+    expect(systemMessage).toContain("do not attempt to write a long file in one shot");
+    expect(systemMessage).toContain("write files in multiple chunks");
+
+    runtime.stop();
+  });
+
   it("should respond to tool result events matching pending action", async () => {
     runtime.start();
 
