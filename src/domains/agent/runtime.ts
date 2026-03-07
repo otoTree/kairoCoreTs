@@ -82,6 +82,9 @@ export class AgentRuntime {
   // 自动继续标志：用于 say 动作后自动触发下一个 Tick
   private shouldAutoContinue: boolean = false;
   private autoContinueStreak: number = 0;
+  private lastSaySignature: string | null = null;
+  private repeatedSayCount: number = 0;
+  private static readonly MAX_REPEATED_SAY_COUNT = 2;
 
   constructor(options: AgentRuntimeOptions) {
     this.id = options.id || "default";
@@ -416,7 +419,12 @@ export class AgentRuntime {
       
       this.log(`Raw Output:`, response.content);
 
-      const { thought, action } = this.parseResponse(response.content);
+      const { thought, action: parsedAction } = this.parseResponse(response.content);
+      let action = parsedAction;
+      if (this.shouldConvertRepeatedSayToNoop(action)) {
+        this.log("Detected repeated say loop, converting action to noop.", { content: action.content });
+        action = { type: "noop" };
+      }
       
       this.log(`Thought: ${thought}`);
       this.log(`Action:`, action);
@@ -793,6 +801,12 @@ ${facts}
 【Response Format】
 You must respond with a JSON object strictly. Do not include markdown code blocks (like \`\`\`json).
 
+【Action Selection Rules】
+- Never repeat the same "say" content in consecutive turns.
+- If there is no new progress, no new result, and no concrete next action, use "noop".
+- After a "say" with continue intent, your next action should be concrete progress (tool_call/render/finish). If you cannot progress, use "noop".
+- Use "say" only when you have new information for the user.
+
 Valid "action.type" values:
 ${validActionTypes.map(t => `- "${t}"`).join('\n')}
 
@@ -889,6 +903,35 @@ Or if no action is needed (waiting for user):
         action: { type: "noop" }
       };
     }
+  }
+
+  private shouldConvertRepeatedSayToNoop(action: any): boolean {
+    if (!action || action.type !== "say") {
+      this.lastSaySignature = null;
+      this.repeatedSayCount = 0;
+      return false;
+    }
+
+    const signature = this.normalizeSayContent(action.content);
+    if (!signature) {
+      this.lastSaySignature = null;
+      this.repeatedSayCount = 0;
+      return false;
+    }
+
+    if (this.lastSaySignature === signature) {
+      this.repeatedSayCount += 1;
+    } else {
+      this.lastSaySignature = signature;
+      this.repeatedSayCount = 1;
+    }
+
+    return this.repeatedSayCount >= AgentRuntime.MAX_REPEATED_SAY_COUNT;
+  }
+
+  private normalizeSayContent(content: unknown): string {
+    if (typeof content !== "string") return "";
+    return content.replace(/\s+/g, " ").trim();
   }
 
   private describeRuntimeError(error: unknown): string {

@@ -184,6 +184,48 @@ describe("AgentRuntime (Event Driven)", () => {
     runtime.stop();
   });
 
+  it("should convert repeated say loops to noop", async () => {
+    runtime.start();
+    const actionEvents: any[] = [];
+    const continueEvents: any[] = [];
+    bus.subscribe("kairo.agent.action", (e) => {
+      actionEvents.push(e);
+    });
+    bus.subscribe("kairo.agent.internal.continue", (e) => {
+      continueEvents.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "先告知用户，然后继续执行",
+        action: { type: "say", content: "正在处理", continue: true }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "继续告知用户",
+        action: { type: "say", content: "正在处理", continue: true }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "开始任务" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 180));
+
+    expect(mockChat).toHaveBeenCalledTimes(2);
+    expect(actionEvents).toHaveLength(1);
+    expect(actionEvents[0]?.data?.action?.type).toBe("say");
+    expect(continueEvents).toHaveLength(1);
+
+    runtime.stop();
+  });
+
   it("should end intent when action type is finish", async () => {
     runtime.start();
     const intentEvents: any[] = [];
