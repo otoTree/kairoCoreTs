@@ -1,7 +1,7 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
 import { AgentRuntime } from "./runtime";
 import { InMemoryGlobalBus, RingBufferEventStore } from "../events";
-import { InMemoryAgentMemory } from "./memory";
+import { InMemoryAgentMemory, type AgentMemory } from "./memory";
 import type { AIPlugin } from "../ai/ai.plugin";
 import type { AIProvider } from "../ai/types";
 
@@ -254,5 +254,59 @@ describe("AgentRuntime (Event Driven)", () => {
     expect(ended.data.result).toBe("ok");
 
     runtime.stop();
+  });
+
+  it("should pass maxTokens to ai chat calls", async () => {
+    const runtimeWithMaxTokens = new AgentRuntime({
+      ai: mockAI,
+      bus,
+      memory,
+      maxTokens: 256,
+    });
+    runtimeWithMaxTokens.start();
+
+    await bus.publish({
+      type: `kairo.agent.${runtimeWithMaxTokens.id}.message`,
+      source: "user",
+      data: { content: "测试 maxTokens" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    const calls = mockChat.mock.calls as unknown as any[][];
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]?.[1]).toEqual({ maxTokens: 256 });
+
+    runtimeWithMaxTokens.stop();
+  });
+
+  it("should trigger compression at 80 percent of configured maxTokens", async () => {
+    const compress = mock(async () => {});
+    const lightweightMemory: AgentMemory = {
+      getContext: () => "x".repeat(21),
+      update: () => {},
+      compress: compress as any,
+      recall: async () => [],
+      memorize: async () => {},
+    };
+    const runtimeWithThreshold = new AgentRuntime({
+      ai: mockAI,
+      bus,
+      memory: lightweightMemory,
+      maxTokens: 10,
+    });
+    runtimeWithThreshold.start();
+
+    await bus.publish({
+      type: `kairo.agent.${runtimeWithThreshold.id}.message`,
+      source: "user",
+      data: { content: "触发压缩" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    expect(compress).toHaveBeenCalledTimes(1);
+
+    runtimeWithThreshold.stop();
   });
 });

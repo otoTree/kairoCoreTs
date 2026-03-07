@@ -8,11 +8,21 @@ import type {
 } from "../types";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
-import { createDecipheriv } from "node:crypto";
+import { createDecipheriv, randomUUID } from "node:crypto";
 
 type FeishuApiPayload = { code?: number; msg?: string; [key: string]: any };
 type AgentAction = { type: string; content: string };
 type FeishuRequestError = Error & { retryable?: boolean };
+type FeishuReceiveIdType = "chat_id" | "user_id" | "email" | "open_id";
+type FeishuMessageType =
+  | "text"
+  | "post"
+  | "image"
+  | "file"
+  | "audio"
+  | "media"
+  | "sticker"
+  | "interactive";
 
 export class FeishuChannelAdapter implements ChannelAdapter {
   readonly name = "feishu";
@@ -30,9 +40,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private static readonly SEND_RETRY_MAX = 4;
   private static readonly SEND_RETRY_BASE_DELAY_MS = 350;
   private static readonly SEND_MIN_INTERVAL_MS = 250;
+  private static readonly TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
   private publishToAgent?: ChannelPublishToAgent;
   private tenantAccessToken?: string;
   private tenantTokenExpireAt = 0;
+  private tenantTokenPromise?: Promise<string>;
   private pendingChats = new Map<string, { chatId: string; updatedAt: number }>();
   private outboundSendQueue = new Map<string, Promise<void>>();
   private lastSendAt = 0;
@@ -108,7 +120,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       if (!this.shouldForwardEvent(event)) return;
       await this.enqueueSendTask(context.chatId, async () => {
         if (actionContent) {
-          await this.sendMessage(context.chatId, "text", {
+          await this.sendMessage("chat_id", context.chatId, "text", {
             text: this.normalizeDisplayText(actionContent),
           });
         } else {
@@ -471,29 +483,42 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   private async getTenantAccessToken(): Promise<string> {
     const now = Date.now();
-    if (this.tenantAccessToken && now < this.tenantTokenExpireAt - 60_000) {
+    if (
+      this.tenantAccessToken &&
+      now < this.tenantTokenExpireAt - FeishuChannelAdapter.TOKEN_REFRESH_BUFFER_MS
+    ) {
       return this.tenantAccessToken;
+    }
+    if (this.tenantTokenPromise) {
+      return this.tenantTokenPromise;
     }
     if (!this.appId || !this.appSecret) {
       throw new Error("feishu app credentials are not configured");
     }
-    const response = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
-      method: "POST",
-      headers: { "Content-Type": "application/json; charset=utf-8" },
-      body: JSON.stringify({
-        app_id: this.appId,
-        app_secret: this.appSecret,
-      }),
-    });
-    const payload = await this.readJsonPayload(response);
-    this.ensureFeishuSuccess("tenant token", response, payload);
-    const token = payload.tenant_access_token;
-    if (typeof token !== "string" || !token) {
-      throw new Error("tenant token failed: invalid token");
+    this.tenantTokenPromise = (async () => {
+      const response = await fetch("https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal", {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          app_id: this.appId,
+          app_secret: this.appSecret,
+        }),
+      });
+      const payload = await this.readJsonPayload(response);
+      this.ensureFeishuSuccess("tenant token", response, payload);
+      const token = payload.tenant_access_token;
+      if (typeof token !== "string" || !token) {
+        throw new Error("tenant token failed: invalid token");
+      }
+      this.tenantAccessToken = token;
+      this.tenantTokenExpireAt = Date.now() + Number(payload.expire || 7200) * 1000;
+      return token;
+    })();
+    try {
+      return await this.tenantTokenPromise;
+    } finally {
+      this.tenantTokenPromise = undefined;
     }
-    this.tenantAccessToken = token;
-    this.tenantTokenExpireAt = Date.now() + Number(payload.expire || 7200) * 1000;
-    return token;
   }
 
   private async sendEventMessage(chatId: string, event: KairoEvent) {
@@ -672,9 +697,9 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private async sendPostMessage(chatId: string, title: string, lines: string[]) {
     const rows = lines.slice(0, 30).map((line) => [{ tag: "text", text: line }]);
     if (rows.length === 0) {
-      return
+      return;
     }
-    await this.sendMessage(chatId, "post", {
+    await this.sendMessage("chat_id", chatId, "post", {
       zh_cn: {
         title: this.normalizeDisplayText(title).slice(0, 80),
         content: rows,
@@ -684,7 +709,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
 
   private async sendFileMessage(chatId: string, filePath: string) {
     const fileKey = await this.uploadFile(filePath);
-    await this.sendMessage(chatId, "file", { file_key: fileKey });
+    await this.sendMessage("chat_id", chatId, "file", { file_key: fileKey });
   }
 
   private async enqueueSendTask(chatId: string, task: () => Promise<void>) {
@@ -725,6 +750,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const msg = String(payload.msg || "").toLowerCase();
     if (!msg) return false;
     return (
+      msg.includes("token expired") ||
+      msg.includes("token is expired") ||
+      msg.includes("invalid tenant_access_token") ||
+      msg.includes("invalid access token") ||
+      msg.includes("unauthorized") ||
       msg.includes("rate limit") ||
       msg.includes("too many request") ||
       msg.includes("频率") ||
@@ -739,6 +769,12 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     const msg = String(payload.msg || "").toLowerCase();
     if (!msg) return false;
     return msg.includes("token") && (msg.includes("expire") || msg.includes("invalid") || msg.includes("unauthorized"));
+  }
+
+  private clearTenantToken() {
+    this.tenantAccessToken = undefined;
+    this.tenantTokenExpireAt = 0;
+    this.tenantTokenPromise = undefined;
   }
 
   private getRetryDelayMs(attempt: number) {
@@ -758,31 +794,45 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return false;
   }
 
-  private async sendMessage(chatId: string, msgType: "text" | "file" | "post", content: Record<string, any>) {
+  private async sendMessage(
+    receiveIdType: FeishuReceiveIdType,
+    receiveIdInput: string,
+    msgType: FeishuMessageType,
+    content: Record<string, any> | string,
+  ) {
+    const receiveId = receiveIdInput.trim();
+    if (!receiveId) {
+      throw new Error("send message failed: receive id is empty");
+    }
+    const requestUuid = randomUUID();
+    const messageContent = typeof content === "string" ? content : JSON.stringify(content);
     let lastError: unknown;
     for (let attempt = 1; attempt <= FeishuChannelAdapter.SEND_RETRY_MAX; attempt++) {
       try {
         await this.waitSendWindow();
         const token = await this.getTenantAccessToken();
-        const response = await fetch("https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id", {
+        const response = await fetch(
+          `https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=${encodeURIComponent(receiveIdType)}`,
+          {
           method: "POST",
           headers: {
             Authorization: `Bearer ${token}`,
             "Content-Type": "application/json; charset=utf-8",
           },
           body: JSON.stringify({
-            receive_id: chatId,
+            receive_id: receiveId,
             msg_type: msgType,
-            content: JSON.stringify(content),
+            content: messageContent,
+            uuid: requestUuid,
           }),
-        });
+          },
+        );
         const payload = await this.readJsonPayload(response);
         if (response.ok && payload.code === 0) {
           return;
         }
         if (this.shouldInvalidateToken(response, payload)) {
-          this.tenantAccessToken = undefined;
-          this.tenantTokenExpireAt = 0;
+          this.clearTenantToken();
         }
         throw this.createFeishuRequestError("send message", response, payload, this.shouldRetryFeishuRequest(response, payload));
       } catch (error) {
@@ -790,6 +840,15 @@ export class FeishuChannelAdapter implements ChannelAdapter {
         if (attempt >= FeishuChannelAdapter.SEND_RETRY_MAX || !this.isRetryableRuntimeError(error)) {
           throw error;
         }
+        console.warn("[Channel:feishu] Send message retrying", {
+          attempt,
+          maxRetry: FeishuChannelAdapter.SEND_RETRY_MAX,
+          receiveIdType,
+          receiveId,
+          msgType,
+          uuid: requestUuid,
+          error: error instanceof Error ? error.message : String(error),
+        });
         await this.sleep(this.getRetryDelayMs(attempt));
       }
     }

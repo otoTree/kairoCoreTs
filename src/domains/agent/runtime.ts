@@ -29,6 +29,7 @@ export interface VaultResolver {
 export interface AgentRuntimeOptions {
   id?: string;
   ai: AIPlugin;
+  maxTokens?: number;
   mcp?: MCPPlugin;
   bus: EventBus;
   memory: AgentMemory;
@@ -85,10 +86,16 @@ export class AgentRuntime {
   private lastSaySignature: string | null = null;
   private repeatedSayCount: number = 0;
   private static readonly MAX_REPEATED_SAY_COUNT = 2;
+  private static readonly DEFAULT_CONTEXT_TOKENS = 40000;
+  private static readonly CONTEXT_COMPRESSION_RATIO = 0.8;
+  private static readonly CHARS_PER_TOKEN = 2.5;
+  private maxTokens?: number;
+  private compressionThresholdChars: number;
 
   constructor(options: AgentRuntimeOptions) {
     this.id = options.id || "default";
     this.ai = options.ai;
+    this.maxTokens = options.maxTokens && options.maxTokens > 0 ? Math.floor(options.maxTokens) : undefined;
     this.mcp = options.mcp;
     this.bus = options.bus;
     this.memory = options.memory;
@@ -105,6 +112,15 @@ export class AgentRuntime {
         });
     }
     this.capabilities = options.capabilities || [];
+    this.compressionThresholdChars = this.resolveCompressionThresholdChars();
+  }
+
+  private resolveCompressionThresholdChars(): number {
+    const contextTokens = this.maxTokens || AgentRuntime.DEFAULT_CONTEXT_TOKENS;
+    return Math.max(
+      1,
+      Math.floor(contextTokens * AgentRuntime.CONTEXT_COMPRESSION_RATIO * AgentRuntime.CHARS_PER_TOKEN),
+    );
   }
 
   registerSystemTool(definition: Tool, handler: (args: any, context: SystemToolContext) => Promise<any>) {
@@ -356,11 +372,8 @@ export class AgentRuntime {
 
     let context = this.memory.getContext();
 
-    // Check compression trigger (80% of ~40k tokens)
-    // Heuristic: ~80,000 characters
-    const COMPRESSION_THRESHOLD_CHARS = 80000;
-    if (context.length > COMPRESSION_THRESHOLD_CHARS) {
-      console.log(`[AgentRuntime] Context length ${context.length} > ${COMPRESSION_THRESHOLD_CHARS}. Triggering compression...`);
+    if (context.length > this.compressionThresholdChars) {
+      console.log(`[AgentRuntime] Context length ${context.length} > ${this.compressionThresholdChars}. Triggering compression...`);
       await this.memory.compress(this.ai);
       context = this.memory.getContext(); // Refresh context
     }
@@ -408,10 +421,13 @@ export class AgentRuntime {
     this.log(`Input Prompt:`, { system: systemPrompt, user: userPrompt });
 
     try {
-      const response = await this.ai.chat([
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userPrompt }
-      ]);
+      const response = await this.ai.chat(
+        [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: userPrompt }
+        ],
+        this.maxTokens ? { maxTokens: this.maxTokens } : undefined,
+      );
 
       if (response.usage) {
         this.log(`Token Usage: Input=${response.usage.input}, Output=${response.usage.output}`, response.usage);

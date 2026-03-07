@@ -42,12 +42,25 @@ export class AgentPlugin implements Plugin {
   private taskAgentManager?: TaskAgentManager;
   private checkpointManager?: CheckpointManager;
   private cleanupTimer?: ReturnType<typeof setInterval>;
+  private readonly runtimeMaxTokens?: number;
 
   constructor() {
     this.globalBus = new InMemoryGlobalBus(new RingBufferEventStore());
     this.bus = new LegacyObservationBusAdapter(this.globalBus);
     this.memory = new InMemoryAgentMemory();
     this.sharedMemory = new InMemorySharedMemory();
+    this.runtimeMaxTokens = this.resolveRuntimeMaxTokens();
+  }
+
+  private resolveRuntimeMaxTokens(): number | undefined {
+    const raw = process.env.AGENT_MAX_TOKENS;
+    if (!raw) return undefined;
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      console.warn(`[Agent] Invalid AGENT_MAX_TOKENS value: ${raw}`);
+      return undefined;
+    }
+    return parsed;
   }
 
   registerSystemTool(definition: any, handler: (args: any, context: any) => Promise<any>) {
@@ -246,6 +259,7 @@ export class AgentPlugin implements Plugin {
     const runtime = new AgentRuntime({
       id: config.id,
       ai: this.ai!,
+      maxTokens: this.runtimeMaxTokens,
       mcp: this.mcp,
       bus: config.bus || this.globalBus,
       memory,
@@ -393,6 +407,7 @@ export class AgentPlugin implements Plugin {
       const runtime = new AgentRuntime({
           id,
           ai: this.ai!,
+          maxTokens: this.runtimeMaxTokens,
           mcp: this.mcp,
           bus: this.globalBus,
           memory: agentMemory,
