@@ -251,6 +251,12 @@ export class TaskOrchestrator {
     return this.tasks.get(taskId);
   }
 
+  getTasksByAgent(agentId: string): Task[] {
+    return Array.from(this.tasks.values())
+      .filter(task => task.agentId === agentId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
   /**
    * 获取 agent 的所有活跃任务
    */

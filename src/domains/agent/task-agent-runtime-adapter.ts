@@ -58,6 +58,10 @@ export class TaskAgentRuntimeAdapter {
       if (action.type === "finish") {
         this.reportCompletion(action.result);
       }
+
+      if (action.type === "noop") {
+        this.reportNoop(action.content);
+      }
     };
   }
 
@@ -120,6 +124,19 @@ export class TaskAgentRuntimeAdapter {
         taskAgentId: this.config.id,
         taskId: this.config.taskId,
         result,
+        timestamp: Date.now(),
+      },
+    });
+  }
+
+  private reportNoop(message?: string) {
+    this.bus.publish({
+      type: "kairo.task.agent.noop",
+      source: `task-agent:${this.config.id}`,
+      data: {
+        taskAgentId: this.config.id,
+        taskId: this.config.taskId,
+        message: message || "Task Agent 当前无可执行动作，进入等待状态",
         timestamp: Date.now(),
       },
     });

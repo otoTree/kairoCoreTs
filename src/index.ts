@@ -50,6 +50,10 @@ async function bootstrap() {
     process.env.KAIRO_RUNTIME_DIR = runtimeDir;
     process.env.KAIRO_IPC_SOCKET = IPC_SOCKET_PATH;
     process.env.KAIRO_WS_TOKEN_FILE = TOKEN_FILE_PATH;
+    process.env.KAIRO_PROJECT_ROOT = PROJECT_ROOT;
+    process.env.KAIRO_WORKSPACE_DIR = WORKSPACE_DIR;
+    process.env.KAIRO_SKILLS_DIR = SKILLS_DIR;
+    process.env.KAIRO_MCP_DIR = MCP_DIR;
 
     console.log("[Config] Python Env:", PYTHON_ENV_DIR);
     console.log("[Config] Workspace:", WORKSPACE_DIR);

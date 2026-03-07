@@ -121,12 +121,12 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       await this.enqueueSendTask(context.chatId, async () => {
         if (actionContent) {
           await this.sendMessage("chat_id", context.chatId, "text", {
-            text: this.normalizeDisplayText(actionContent),
+            text: this.wrapMarkdownMessage(actionContent),
           });
         } else {
           await this.sendEventMessage(context.chatId, event);
         }
-        const filePaths = await this.collectExistingPaths(actionContent);
+        const filePaths = await this.collectExistingPaths(event, actionContent);
         for (const filePath of filePaths) {
           await this.sendFileMessage(context.chatId, filePath);
         }
@@ -522,6 +522,13 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private async sendEventMessage(chatId: string, event: KairoEvent) {
+    const thoughtMessage = this.extractThoughtEventMessage(event);
+    if (thoughtMessage) {
+      await this.sendMessage("chat_id", chatId, "text", {
+        text: this.wrapThoughtMessage(thoughtMessage),
+      });
+      return;
+    }
     const post = this.buildEventPost(event);
     await this.sendPostMessage(chatId, post.title, post.lines);
   }
@@ -658,14 +665,34 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return lines;
   }
 
+  private extractThoughtEventMessage(event: KairoEvent): string {
+    if (event.type !== "kairo.agent.thought") return "";
+    const rawThought = (event.data as any)?.thought;
+    if (typeof rawThought === "string") {
+      const extracted = this.extractThoughtOrMessageText(rawThought);
+      return extracted || rawThought.trim();
+    }
+    return this.pickThought(rawThought);
+  }
+
+  private wrapMarkdownMessage(input: string): string {
+    const normalized = this.normalizeDisplayText(input);
+    if (!normalized) return "";
+    return `\`\`\`markdown\n${normalized}\n\`\`\``;
+  }
+
+  private wrapThoughtMessage(input: string): string {
+    const normalized = this.normalizeDisplayText(input);
+    if (!normalized) return "";
+    return normalized
+      .split("\n")
+      .map((line) => (line.trim() ? `> ${line}` : ">"))
+      .join("\n");
+  }
+
   private normalizeDisplayText(input: string): string {
     return input
       .replace(/\r\n/g, "\n")
-      .replace(/^#{1,6}\s*/gm, "")
-      .replace(/\*\*(.*?)\*\*/g, "$1")
-      .replace(/\*(.*?)\*/g, "$1")
-      .replace(/`([^`]+)`/g, "$1")
-      .replace(/\[(.*?)\]\((https?:\/\/[^\s)]+)\)/g, "$1 ($2)")
       .trim();
   }
 
@@ -916,17 +943,10 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return eventChatId?.trim() || "";
   }
 
-  private async collectExistingPaths(content: string): Promise<string[]> {
+  private async collectExistingPaths(event: KairoEvent, content: string): Promise<string[]> {
     const matches = new Set<string>();
-    const pathRegex = /(?:^|\s)(\/[^\s"'`]+|\.\.?\/[^\s"'`]+)/g;
-    let found: RegExpExecArray | null = null;
-    while ((found = pathRegex.exec(content)) !== null) {
-      const raw = (found[1] || "").trim();
-      if (!raw) continue;
-      const cleaned = raw.replace(/[),.;:!?]+$/, "");
-      const absolute = cleaned.startsWith("/") ? cleaned : resolve(process.cwd(), cleaned);
-      matches.add(absolute);
-    }
+    this.collectPathCandidatesFromText(content, matches);
+    this.collectPathCandidatesFromValue((event as any)?.data, matches, 0);
 
     const existing: string[] = [];
     for (const filePath of matches) {
@@ -936,5 +956,39 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       } catch {}
     }
     return existing;
+  }
+
+  private collectPathCandidatesFromValue(value: unknown, matches: Set<string>, depth: number) {
+    if (depth > 6) return;
+    if (typeof value === "string") {
+      this.collectPathCandidatesFromText(value, matches);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value.slice(0, 80)) {
+        this.collectPathCandidatesFromValue(item, matches, depth + 1);
+      }
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      return;
+    }
+    const entries = Object.entries(value as Record<string, unknown>).slice(0, 80);
+    for (const [, item] of entries) {
+      this.collectPathCandidatesFromValue(item, matches, depth + 1);
+    }
+  }
+
+  private collectPathCandidatesFromText(content: string, matches: Set<string>) {
+    if (!content) return;
+    const pathRegex = /(?:^|\s)(\/[^\s"'`]+|\.\.?\/[^\s"'`]+)/g;
+    let found: RegExpExecArray | null = null;
+    while ((found = pathRegex.exec(content)) !== null) {
+      const raw = (found[1] || "").trim();
+      if (!raw) continue;
+      const cleaned = raw.replace(/[),.;:!?]+$/, "");
+      const absolute = cleaned.startsWith("/") ? cleaned : resolve(process.cwd(), cleaned);
+      matches.add(absolute);
+    }
   }
 }

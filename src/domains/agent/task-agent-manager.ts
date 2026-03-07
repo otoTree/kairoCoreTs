@@ -113,6 +113,7 @@ export class TaskAgentManager {
       state.localBus = localBus;
       state.unsubscribers = [
         localBus.subscribe("kairo.task.agent.progress", this.handleTaskAgentProgress.bind(this)),
+        localBus.subscribe("kairo.task.agent.noop", this.handleTaskAgentNoop.bind(this)),
         localBus.subscribe("kairo.task.agent.completed", this.handleTaskAgentCompleted.bind(this)),
       ];
 
@@ -316,6 +317,27 @@ ${JSON.stringify(task.context, null, 2)}
         correlationId: task.correlationId,
       });
     }
+  }
+
+  private handleTaskAgentNoop(event: KairoEvent) {
+    const { taskAgentId, taskId, message } = event.data as any;
+
+    const state = this.taskAgents.get(taskAgentId);
+    if (!state) return;
+
+    const task = this.orchestrator.getTask(taskId);
+    if (!task) return;
+
+    this.bus.publish({
+      type: `kairo.agent.${task.agentId}.message`,
+      source: "task-agent-manager",
+      data: {
+        content: `[Task Agent 状态] ${message || "Task Agent 返回 noop，等待后续输入或事件继续执行。"}`,
+        taskId,
+        taskAgentId,
+      },
+      correlationId: task.correlationId,
+    });
   }
 
   /**

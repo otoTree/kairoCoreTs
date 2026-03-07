@@ -10,7 +10,7 @@ import { InMemoryGlobalBus, RingBufferEventStore, type EventBus, type KairoEvent
 import type { Vault } from "../vault/vault";
 import type { MemoryStore } from "../memory/memory-store";
 import { CapabilityRegistry, type AgentCapability } from "./capability-registry";
-import { TaskOrchestrator, TaskType } from "./task-orchestrator";
+import { TaskOrchestrator, TaskStatus, TaskType } from "./task-orchestrator";
 import { TaskAgentManager, type TaskAgentConfig } from "./task-agent-manager";
 import { TaskAgentRuntimeAdapter } from "./task-agent-runtime-adapter";
 import { CheckpointManager } from "./checkpoint-manager";
@@ -361,13 +361,34 @@ export class AgentPlugin implements Plugin {
         }
 
         const agentId = context?.agentId || this.activeAgentId;
-        const activeTasks = this.orchestrator.getActiveTasks(agentId);
+        const tasks = this.orchestrator.getTasksByAgent(agentId);
+        const activeTasks = tasks.filter(
+          t => t.status === TaskStatus.RUNNING || t.status === TaskStatus.PAUSED,
+        );
+        const summary = {
+          total: tasks.length,
+          pending: tasks.filter(t => t.status === TaskStatus.PENDING).length,
+          running: tasks.filter(t => t.status === TaskStatus.RUNNING).length,
+          paused: tasks.filter(t => t.status === TaskStatus.PAUSED).length,
+          completed: tasks.filter(t => t.status === TaskStatus.COMPLETED).length,
+          failed: tasks.filter(t => t.status === TaskStatus.FAILED).length,
+          cancelled: tasks.filter(t => t.status === TaskStatus.CANCELLED).length,
+        };
         return {
+          summary,
           activeTasks: activeTasks.map(t => ({
             id: t.id,
             description: t.description,
             status: t.status,
             progress: t.progress,
+          })),
+          recentTasks: tasks.slice(0, 10).map(t => ({
+            id: t.id,
+            description: t.description,
+            status: t.status,
+            progress: t.progress,
+            createdAt: t.createdAt,
+            completedAt: t.completedAt,
           })),
         };
       },

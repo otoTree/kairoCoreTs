@@ -778,6 +778,10 @@ export class AgentRuntime {
               facts = `\n【Shared Knowledge】\n${allFacts.map(f => `- ${f}`).join('\n')}`;
           }
       }
+      const projectRoot = process.env.KAIRO_PROJECT_ROOT || process.cwd();
+      const workspaceDir = process.env.KAIRO_WORKSPACE_DIR || projectRoot;
+      const skillsDir = process.env.KAIRO_SKILLS_DIR || `${projectRoot}/skills`;
+      const mcpDir = process.env.KAIRO_MCP_DIR || `${projectRoot}/mcp`;
 
       const validActionTypes = ["say", "query", "render", "finish", "noop"];
       if (toolsContext && toolsContext.trim().length > 0) {
@@ -803,6 +807,10 @@ Your goal is to assist the user with their tasks efficiently and safely.
 【Environment】
 - OS: ${process.platform}
 - CWD: ${process.cwd()}
+- ProjectRoot: ${projectRoot}
+- Workspace: ${workspaceDir}
+- SkillsDir: ${skillsDir}
+- MCPDir: ${mcpDir}
 - Date: ${new Date().toISOString()}
 
 ${facts}
@@ -839,6 +847,11 @@ You must respond with a JSON object strictly. Do not include markdown code block
 - If there is no new progress, no new result, and no concrete next action, use "noop".
 - After a "say" with continue intent, your next action should be concrete progress (tool_call/render/finish). If you cannot progress, use "noop".
 - Use "say" only when you have new information for the user.
+- For file paths and cwd, use absolute paths under Workspace unless user specifies otherwise.
+- Directory responsibilities:
+  - SkillsDir stores skill definitions and related skill resources.
+  - MCPDir stores local MCP server configurations and MCP assets.
+  - Workspace is the primary working area for reading/writing files, commands, and outputs.
 
 Valid "action.type" values:
 ${validActionTypes.map(t => `- "${t}"`).join('\n')}
@@ -920,22 +933,101 @@ Or if no action is needed (waiting for user):
   }
 
   private parseResponse(content: string): { thought: string; action: any } {
-    try {
-      // Try to find JSON object in the content (in case LLM adds extra text)
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      const jsonStr = jsonMatch ? jsonMatch[0] : content;
-      const parsed = JSON.parse(jsonStr);
+    const normalizedContent = this.normalizeModelOutput(content);
+    const directParsed = this.tryParseJson(normalizedContent);
+    if (directParsed) {
+      return this.normalizeParsedResponse(directParsed);
+    }
+
+    for (const candidate of this.extractJsonCandidates(normalizedContent)) {
+      const parsed = this.tryParseJson(candidate);
+      if (parsed) {
+        return this.normalizeParsedResponse(parsed);
+      }
+    }
+
+    console.error("Failed to parse response:", content);
+    const fallbackContent = normalizedContent.trim();
+    if (fallbackContent.length > 0) {
       return {
-        thought: parsed.thought || "No thought provided",
-        action: parsed.action || { type: "noop" }
-      };
-    } catch (e) {
-      console.error("Failed to parse response:", content);
-      return {
-        thought: "Failed to parse response",
-        action: { type: "noop" }
+        thought: "Model returned non-JSON response",
+        action: {
+          type: "say",
+          content: fallbackContent.slice(0, 4000),
+        },
       };
     }
+
+    return {
+      thought: "Failed to parse response",
+      action: { type: "noop" }
+    };
+  }
+
+  private normalizeModelOutput(content: string): string {
+    return content
+      .replace(/```json/gi, "")
+      .replace(/```/g, "")
+      .trim();
+  }
+
+  private tryParseJson(content: string): any | null {
+    if (!content) return null;
+    try {
+      return JSON.parse(content);
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeParsedResponse(parsed: any): { thought: string; action: any } {
+    const thought = typeof parsed?.thought === "string" && parsed.thought.trim().length > 0
+      ? parsed.thought
+      : "No thought provided";
+    const action = typeof parsed?.action === "object" && parsed.action !== null
+      ? parsed.action
+      : { type: "noop" };
+    return { thought, action };
+  }
+
+  private extractJsonCandidates(content: string): string[] {
+    const candidates: string[] = [];
+    let inString = false;
+    let escaped = false;
+    let depth = 0;
+    let start = -1;
+
+    for (let i = 0; i < content.length; i++) {
+      const char = content[i];
+      if (char === "\\" && inString) {
+        escaped = !escaped;
+        continue;
+      }
+      if (char === "\"" && !escaped) {
+        inString = !inString;
+      }
+      escaped = false;
+      if (inString) continue;
+      if (char === "{") {
+        if (depth === 0) start = i;
+        depth += 1;
+      } else if (char === "}") {
+        depth -= 1;
+        if (depth === 0 && start >= 0) {
+          candidates.push(content.slice(start, i + 1));
+          start = -1;
+        }
+      }
+    }
+
+    return candidates.sort((a, b) => this.scoreJsonCandidate(b) - this.scoreJsonCandidate(a) || b.length - a.length);
+  }
+
+  private scoreJsonCandidate(candidate: string): number {
+    let score = 0;
+    if (candidate.includes("\"action\"")) score += 2;
+    if (candidate.includes("\"thought\"")) score += 1;
+    return score;
   }
 
   private shouldConvertRepeatedSayToNoop(action: any): boolean {

@@ -67,6 +67,42 @@ describe("AgentRuntime (Event Driven)", () => {
     runtime.stop();
   });
 
+  it("should include directory responsibilities in system prompt", async () => {
+    const previousProjectRoot = process.env.KAIRO_PROJECT_ROOT;
+    const previousWorkspaceDir = process.env.KAIRO_WORKSPACE_DIR;
+    const previousSkillsDir = process.env.KAIRO_SKILLS_DIR;
+    const previousMcpDir = process.env.KAIRO_MCP_DIR;
+    process.env.KAIRO_PROJECT_ROOT = "/tmp/project-root";
+    process.env.KAIRO_WORKSPACE_DIR = "/tmp/project-root/workspace";
+    process.env.KAIRO_SKILLS_DIR = "/tmp/project-root/skills";
+    process.env.KAIRO_MCP_DIR = "/tmp/project-root/mcp";
+    try {
+      runtime.start();
+
+      await bus.publish({
+        type: `kairo.agent.${runtime.id}.message`,
+        source: "user",
+        data: { content: "目录规则测试" }
+      });
+
+      await new Promise(resolve => setTimeout(resolve, 60));
+
+      expect(mockChat).toHaveBeenCalled();
+      const calls = mockChat.mock.calls as unknown as any[][];
+      const prompt = calls[calls.length - 1]![0] as any[];
+      const systemMessage = prompt.find((p: any) => p.role === "system").content;
+      expect(systemMessage).toContain("SkillsDir: /tmp/project-root/skills");
+      expect(systemMessage).toContain("MCPDir: /tmp/project-root/mcp");
+      expect(systemMessage).toContain("Workspace is the primary working area");
+      runtime.stop();
+    } finally {
+      process.env.KAIRO_PROJECT_ROOT = previousProjectRoot;
+      process.env.KAIRO_WORKSPACE_DIR = previousWorkspaceDir;
+      process.env.KAIRO_SKILLS_DIR = previousSkillsDir;
+      process.env.KAIRO_MCP_DIR = previousMcpDir;
+    }
+  });
+
   it("should respond to tool result events matching pending action", async () => {
     runtime.start();
 
@@ -252,6 +288,64 @@ describe("AgentRuntime (Event Driven)", () => {
     const ended = intentEvents.find(e => e.type === "kairo.intent.ended");
     expect(ended).toBeDefined();
     expect(ended.data.result).toBe("ok");
+
+    runtime.stop();
+  });
+
+  it("should parse fenced JSON even with trailing non-JSON text", async () => {
+    runtime.start();
+    const actionEvents: any[] = [];
+    bus.subscribe("kairo.agent.action", (e) => {
+      actionEvents.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: `先说明一下
+\`\`\`json
+{"thought":"解析成功","action":{"type":"say","content":"ok"}}
+\`\`\`
+附加文本 {invalid-json-tail}`,
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "测试解析" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    expect(actionEvents).toHaveLength(1);
+    expect(actionEvents[0]?.data?.action?.type).toBe("say");
+    expect(actionEvents[0]?.data?.action?.content).toBe("ok");
+
+    runtime.stop();
+  });
+
+  it("should fallback to say when model returns plain text", async () => {
+    runtime.start();
+    const actionEvents: any[] = [];
+    bus.subscribe("kairo.agent.action", (e) => {
+      actionEvents.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: "这是普通文本响应，不是 JSON",
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "测试纯文本兜底" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    expect(actionEvents).toHaveLength(1);
+    expect(actionEvents[0]?.data?.action?.type).toBe("say");
+    expect(actionEvents[0]?.data?.action?.content).toContain("这是普通文本响应");
 
     runtime.stop();
   });
