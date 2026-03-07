@@ -134,9 +134,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       if (!this.shouldForwardEvent(event)) return;
       await this.enqueueSendTask(chatId, async () => {
         if (actionContent) {
-          await this.sendMessage("chat_id", chatId, "text", {
-            text: this.wrapMarkdownMessage(actionContent),
-          });
+          await this.sendMarkdownCardMessage(chatId, actionContent);
         } else {
           await this.sendEventMessage(chatId, event);
         }
@@ -529,9 +527,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private async sendEventMessage(chatId: string, event: KairoEvent) {
     const thoughtMessage = this.extractThoughtEventMessage(event);
     if (thoughtMessage) {
-      await this.sendMessage("chat_id", chatId, "text", {
-        text: this.wrapThoughtMessage(thoughtMessage),
-      });
+      await this.sendMarkdownCardMessage(chatId, this.wrapThoughtMessage(thoughtMessage));
       return;
     }
     const post = this.buildEventPost(event);
@@ -556,7 +552,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (event.type === "kairo.agent.thought") {
       const thought = this.extractThoughtOrMessageText(data?.thought) || (typeof data?.thought === "string" ? data.thought.trim() : "");
       if (!thought) return [];
-      return ["🧠 思考", ...this.toReadableLines(thought, 1200).map((line) => `  ${line}`)];
+      return ["思考", ...this.toReadableLines(thought, 1200).map((line) => `  ${line}`)];
     }
     if (event.type === "kairo.agent.action") {
       const action = this.getSayOrQueryAction(event);
@@ -683,16 +679,13 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private wrapMarkdownMessage(input: string): string {
     const normalized = this.normalizeDisplayText(input);
     if (!normalized) return "";
-    return `\`\`\`markdown\n${normalized}\n\`\`\``;
+    return normalized;
   }
 
   private wrapThoughtMessage(input: string): string {
     const normalized = this.normalizeDisplayText(input);
     if (!normalized) return "";
-    return normalized
-      .split("\n")
-      .map((line) => (line.trim() ? `> ${line}` : ">"))
-      .join("\n");
+    return `思考\n${normalized}`;
   }
 
   private normalizeDisplayText(input: string): string {
@@ -702,7 +695,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private getEventTitle(eventType: string): string {
-    if (eventType === "kairo.agent.thought") return "🧠 思考";
+    if (eventType === "kairo.agent.thought") return "思考";
     if (eventType.startsWith("kairo.agent.") && eventType.endsWith(".message")) return "💬 消息";
     return "📡 事件";
   }
@@ -727,7 +720,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private async sendPostMessage(chatId: string, title: string, lines: string[]) {
-    const rows = lines.slice(0, 30).map((line) => [{ tag: "markdown", text: line }]);
+    const rows = lines.slice(0, 30).map((line) => [{ tag: "text", text: line }]);
     if (rows.length === 0) {
       return;
     }
@@ -736,6 +729,25 @@ export class FeishuChannelAdapter implements ChannelAdapter {
         title: this.normalizeDisplayText(title).slice(0, 80),
         content: rows,
       },
+    });
+  }
+
+  private async sendMarkdownCardMessage(chatId: string, content: string) {
+    const markdown = this.wrapMarkdownMessage(content);
+    if (!markdown) return;
+    await this.sendMessage("chat_id", chatId, "interactive", {
+      config: {
+        wide_screen_mode: true,
+      },
+      elements: [
+        {
+          tag: "div",
+          text: {
+            tag: "lark_md",
+            content: markdown,
+          },
+        },
+      ],
     });
   }
 
