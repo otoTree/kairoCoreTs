@@ -26,7 +26,6 @@ type FeishuMessageType =
 
 export class FeishuChannelAdapter implements ChannelAdapter {
   readonly name = "feishu";
-  private static readonly CONTEXT_TTL_MS = 15 * 60 * 1000;
   private static readonly CONTEXT_MAX = 1000;
   private static readonly SUPPORTED_MESSAGE_EVENT_TYPES = new Set([
     "im.message.receive_v1",
@@ -45,7 +44,8 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   private tenantAccessToken?: string;
   private tenantTokenExpireAt = 0;
   private tenantTokenPromise?: Promise<string>;
-  private pendingChats = new Map<string, { chatId: string; updatedAt: number }>();
+  private pendingChats = new Map<string, string>();
+  private activeChatId?: string;
   private outboundSendQueue = new Map<string, Promise<void>>();
   private lastSendAt = 0;
 
@@ -109,34 +109,48 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   async handleEvent(event: KairoEvent): Promise<void> {
     const correlationId = event.correlationId;
     if (!correlationId) return;
-    this.cleanupContexts();
-    const context = this.pendingChats.get(correlationId);
-    if (!context) return;
+    const mappedChatId = this.pendingChats.get(correlationId);
+    const chatId = mappedChatId || this.activeChatId;
+    if (!chatId) {
+      console.warn("[Channel:feishu] Missing context for outbound event", {
+        correlationId,
+        eventType: event.type,
+      });
+      return;
+    }
+    if (!mappedChatId) {
+      console.warn("[Channel:feishu] Using active chat fallback for outbound event", {
+        correlationId,
+        eventType: event.type,
+        chatId,
+      });
+      this.pendingChats.set(correlationId, chatId);
+    }
     if (event.source === "client:feishu") {
       return;
     }
     try {
       const actionContent = this.extractActionText(event);
       if (!this.shouldForwardEvent(event)) return;
-      await this.enqueueSendTask(context.chatId, async () => {
+      await this.enqueueSendTask(chatId, async () => {
         if (actionContent) {
-          await this.sendMessage("chat_id", context.chatId, "text", {
+          await this.sendMessage("chat_id", chatId, "text", {
             text: this.wrapMarkdownMessage(actionContent),
           });
         } else {
-          await this.sendEventMessage(context.chatId, event);
+          await this.sendEventMessage(chatId, event);
         }
         const filePaths = await this.collectExistingPaths(event, actionContent);
         for (const filePath of filePaths) {
-          await this.sendFileMessage(context.chatId, filePath);
+          await this.sendFileMessage(chatId, filePath);
         }
-        this.pendingChats.set(correlationId, { chatId: context.chatId, updatedAt: Date.now() });
+        this.pendingChats.set(correlationId, chatId);
       });
     } catch (e) {
       console.error("[Channel:feishu] Failed to send event:", {
         correlationId,
         eventType: event.type,
-        chatId: context.chatId,
+        chatId,
         error: e,
       });
     }
@@ -445,21 +459,12 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private rememberContext(correlationId: string, chatId: string) {
-    this.cleanupContexts();
     if (this.pendingChats.size >= FeishuChannelAdapter.CONTEXT_MAX) {
       const first = this.pendingChats.keys().next().value;
       if (first) this.pendingChats.delete(first);
     }
-    this.pendingChats.set(correlationId, { chatId, updatedAt: Date.now() });
-  }
-
-  private cleanupContexts() {
-    const now = Date.now();
-    for (const [key, value] of this.pendingChats.entries()) {
-      if (now - value.updatedAt > FeishuChannelAdapter.CONTEXT_TTL_MS) {
-        this.pendingChats.delete(key);
-      }
-    }
+    this.pendingChats.set(correlationId, chatId);
+    this.activeChatId = chatId;
   }
 
   private async downloadResource(messageId: string, resourceKey: string, resourceType: string, fileName: string): Promise<string> {
@@ -773,6 +778,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private shouldRetryFeishuRequest(response: Response, payload: FeishuApiPayload) {
+    if (this.shouldInvalidateToken(response, payload)) return true;
     if (response.status >= 500 || response.status === 429) return true;
     const msg = String(payload.msg || "").toLowerCase();
     if (!msg) return false;
@@ -792,10 +798,15 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private shouldInvalidateToken(response: Response, payload: FeishuApiPayload) {
-    if (response.status === 401) return true;
+    if (response.status === 401 || response.status === 403) return true;
     const msg = String(payload.msg || "").toLowerCase();
+    const code = typeof payload.code === "number" ? payload.code : Number.NaN;
+    if ([99991661, 99991663, 99991668].includes(code)) return true;
     if (!msg) return false;
-    return msg.includes("token") && (msg.includes("expire") || msg.includes("invalid") || msg.includes("unauthorized"));
+    return (
+      (msg.includes("token") || msg.includes("授权")) &&
+      (msg.includes("expire") || msg.includes("invalid") || msg.includes("unauthorized") || msg.includes("过期") || msg.includes("失效"))
+    );
   }
 
   private clearTenantToken() {

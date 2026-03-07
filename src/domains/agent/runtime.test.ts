@@ -431,4 +431,50 @@ describe("AgentRuntime (Event Driven)", () => {
 
     runtimeWithThreshold.stop();
   });
+
+  it("should memorize every configured tick interval", async () => {
+    const previousInterval = process.env.KAIRO_MEMORY_MEMORIZE_INTERVAL_TICKS;
+    process.env.KAIRO_MEMORY_MEMORIZE_INTERVAL_TICKS = "2";
+    const memorize = mock(async () => {});
+    const lightweightMemory: AgentMemory = {
+      getContext: () => "",
+      update: () => {},
+      compress: async () => {},
+      recall: async () => [],
+      memorize: memorize as any,
+    };
+    const runtimeWithPeriodicMemorize = new AgentRuntime({
+      ai: mockAI,
+      bus,
+      memory: lightweightMemory,
+    });
+
+    try {
+      runtimeWithPeriodicMemorize.start();
+
+      await bus.publish({
+        type: `kairo.agent.${runtimeWithPeriodicMemorize.id}.message`,
+        source: "user",
+        data: { content: "第一条消息" }
+      });
+      await new Promise(resolve => setTimeout(resolve, 80));
+      expect(memorize).toHaveBeenCalledTimes(0);
+
+      await bus.publish({
+        type: `kairo.agent.${runtimeWithPeriodicMemorize.id}.message`,
+        source: "user",
+        data: { content: "第二条消息" }
+      });
+      await new Promise(resolve => setTimeout(resolve, 80));
+
+      expect(memorize).toHaveBeenCalledTimes(1);
+      const memorizeContent = (memorize as any).mock.calls[0]?.[0];
+      expect(memorizeContent).toContain("Observation:");
+      expect(memorizeContent).toContain("Thought:");
+      expect(memorizeContent).toContain("Action:");
+    } finally {
+      runtimeWithPeriodicMemorize.stop();
+      process.env.KAIRO_MEMORY_MEMORIZE_INTERVAL_TICKS = previousInterval;
+    }
+  });
 });

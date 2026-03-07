@@ -90,8 +90,10 @@ export class AgentRuntime {
   private static readonly DEFAULT_CONTEXT_TOKENS = 40000;
   private static readonly CONTEXT_COMPRESSION_RATIO = 0.8;
   private static readonly CHARS_PER_TOKEN = 2.5;
+  private static readonly DEFAULT_MEMORIZE_INTERVAL_TICKS = 5;
   private maxTokens?: number;
   private compressionThresholdChars: number;
+  private memorizeIntervalTicks: number;
 
   constructor(options: AgentRuntimeOptions) {
     this.id = options.id || "default";
@@ -114,6 +116,7 @@ export class AgentRuntime {
     }
     this.capabilities = options.capabilities || [];
     this.compressionThresholdChars = this.resolveCompressionThresholdChars();
+    this.memorizeIntervalTicks = this.resolveMemorizeIntervalTicks();
   }
 
   private resolveCompressionThresholdChars(): number {
@@ -122,6 +125,18 @@ export class AgentRuntime {
       1,
       Math.floor(contextTokens * AgentRuntime.CONTEXT_COMPRESSION_RATIO * AgentRuntime.CHARS_PER_TOKEN),
     );
+  }
+
+  private resolveMemorizeIntervalTicks(): number {
+    const raw = process.env.KAIRO_MEMORY_MEMORIZE_INTERVAL_TICKS;
+    if (!raw) {
+      return AgentRuntime.DEFAULT_MEMORIZE_INTERVAL_TICKS;
+    }
+    const parsed = Number.parseInt(raw, 10);
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return AgentRuntime.DEFAULT_MEMORIZE_INTERVAL_TICKS;
+    }
+    return parsed;
   }
 
   registerSystemTool(definition: Tool, handler: (args: any, context: SystemToolContext) => Promise<any>) {
@@ -698,12 +713,14 @@ export class AgentRuntime {
       }
 
       // Update Memory
-      this.memory.update({
-        observation: JSON.stringify(observations), 
+      const memorySnapshot = {
+        observation: JSON.stringify(observations),
         thought,
         action: JSON.stringify(action),
-        actionResult: action.type === 'tool_call' ? undefined : (actionResult ? (typeof actionResult === 'string' ? actionResult : JSON.stringify(actionResult)) : undefined)
-      });
+        actionResult: action.type === 'tool_call' ? undefined : (actionResult ? (typeof actionResult === 'string' ? actionResult : JSON.stringify(actionResult)) : undefined),
+      };
+      this.memory.update(memorySnapshot);
+      await this.memorizeByTick(memorySnapshot);
 
 
     } catch (error) {
@@ -767,6 +784,21 @@ export class AgentRuntime {
     }
 
     return null;
+  }
+
+  private async memorizeByTick(snapshot: { observation: string; thought: string; action: string; actionResult?: string }) {
+    if (this.tickCount % this.memorizeIntervalTicks !== 0) {
+      return;
+    }
+    try {
+      await this.memory.memorize(this.formatMemorizeContent(snapshot));
+    } catch (error) {
+      console.warn("[AgentRuntime] Failed to persist long-term memory:", error);
+    }
+  }
+
+  private formatMemorizeContent(snapshot: { observation: string; thought: string; action: string; actionResult?: string }): string {
+    return `Observation: ${snapshot.observation}\nThought: ${snapshot.thought}\nAction: ${snapshot.action}${snapshot.actionResult ? `\nResult: ${snapshot.actionResult}` : ""}`;
   }
   
   // Helper methods (getSystemPrompt, composeUserPrompt, parseResponse, dispatchToolCall)
