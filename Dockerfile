@@ -3,7 +3,17 @@ FROM oven/bun:1
 WORKDIR /app
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends python3 python3-venv python3-pip \
+  && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    curl \
+    dnsutils \
+    iproute2 \
+    iputils-ping \
+    netcat-openbsd \
+    python3 \
+    python3-pip \
+    python3-venv \
+    wget \
   && python3 -m venv /app/.python_env \
   && /app/.python_env/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
   && rm -rf /var/lib/apt/lists/*
