@@ -428,6 +428,9 @@ export class AgentRuntime {
       
       this.log(`Thought: ${thought}`);
       this.log(`Action:`, action);
+      if (this.onAction) {
+        this.onAction(action);
+      }
 
       // Publish Thought Event (Intent Started)
       this.publish({
@@ -764,6 +767,19 @@ export class AgentRuntime {
       if (toolsContext && toolsContext.trim().length > 0) {
           validActionTypes.push("tool_call");
       }
+      const hasCreateLongTaskTool = this.systemTools.has("kairo_create_long_task");
+      const hasQueryTaskTool = this.systemTools.has("kairo_query_task_status");
+      const hasCancelTaskTool = this.systemTools.has("kairo_cancel_task");
+      const longTaskGuidance = hasCreateLongTaskTool ? `
+
+【Long-Running Task Delegation】
+- As the main agent, you should stay responsive and delegate long-running multi-step work to Task Agent.
+- If the user request is clearly long-running (e.g. generating 100 items, batch processing many files), call tool "kairo_create_long_task" first instead of executing all steps yourself.
+- After delegation, use "say" to clearly inform the user the task is running in background and they can continue asking other questions.
+- If user asks for progress and tool "${hasQueryTaskTool ? "kairo_query_task_status" : "kairo_create_long_task"}" is available, query task status and report concise progress.
+- If user asks to stop background task and tool "${hasCancelTaskTool ? "kairo_cancel_task" : "kairo_create_long_task"}" is available, cancel it and confirm.
+- Do not pretend delegation happened. Use actual tool calls.
+` : "";
 
       return `You are Kairo (Agent ${this.id}), an autonomous AI agent running on the user's local machine.
 Your goal is to assist the user with their tasks efficiently and safely.
@@ -797,6 +813,7 @@ You MUST respond in the same language as the user's input.
 ${context}
 ${toolsContext}
 ${facts}
+${longTaskGuidance}
 
 【Response Format】
 You must respond with a JSON object strictly. Do not include markdown code blocks (like \`\`\`json).
@@ -961,10 +978,6 @@ Or if no action is needed (waiting for user):
     // Resolve handles in args
     const resolvedArgs = this.resolveHandles(args);
     
-    if (this.onAction) {
-        this.onAction(action);
-    }
-
     // Check System Tools first
     if (this.systemTools.has(name)) {
         try {

@@ -10,6 +10,10 @@ import { InMemoryGlobalBus, RingBufferEventStore, type EventBus, type KairoEvent
 import type { Vault } from "../vault/vault";
 import type { MemoryStore } from "../memory/memory-store";
 import { CapabilityRegistry, type AgentCapability } from "./capability-registry";
+import { TaskOrchestrator, TaskType } from "./task-orchestrator";
+import { TaskAgentManager, type TaskAgentConfig } from "./task-agent-manager";
+import { TaskAgentRuntimeAdapter } from "./task-agent-runtime-adapter";
+import { CheckpointManager } from "./checkpoint-manager";
 
 export class AgentPlugin implements Plugin {
   readonly name = "agent";
@@ -34,6 +38,10 @@ export class AgentPlugin implements Plugin {
   private vault?: Vault;
   private memoryStore?: MemoryStore;
   private systemTools: SystemTool[] = [];
+  private orchestrator?: TaskOrchestrator;
+  private taskAgentManager?: TaskAgentManager;
+  private checkpointManager?: CheckpointManager;
+  private cleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor() {
     this.globalBus = new InMemoryGlobalBus(new RingBufferEventStore());
@@ -121,6 +129,19 @@ export class AgentPlugin implements Plugin {
     }
 
     this.spawnAgent("default", this.memory);
+    this.orchestrator = new TaskOrchestrator(this.globalBus);
+    this.checkpointManager = new CheckpointManager(this.orchestrator, this.globalBus);
+    this.taskAgentManager = new TaskAgentManager(
+      this.globalBus,
+      this.orchestrator,
+      this.createTaskAgentRuntime.bind(this),
+    );
+    await this.recoverTasks();
+    this.registerTaskTools();
+    this.cleanupTimer = setInterval(() => {
+      this.orchestrator?.cleanup();
+      this.taskAgentManager?.cleanup();
+    }, 60 * 60 * 1000);
 
     // Subscribe to user messages for routing
     this.globalBus.subscribe("kairo.user.message", this.handleUserMessage.bind(this));
@@ -200,10 +221,165 @@ export class AgentPlugin implements Plugin {
 
   async stop() {
     console.log("[Agent] Stopping Agent domain...");
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
+    if (this.taskAgentManager) {
+      const activeTaskAgents = this.taskAgentManager.getActiveTaskAgents();
+      for (const taskAgent of activeTaskAgents) {
+        await this.taskAgentManager.stopTaskAgent(taskAgent.id);
+      }
+    }
     for (const agent of this.agents.values()) {
         agent.stop();
     }
     this.agents.clear();
+  }
+
+  private async createTaskAgentRuntime(config: TaskAgentConfig): Promise<AgentRuntime> {
+    const memory = new InMemoryAgentMemory();
+    if (this.memoryStore) {
+      memory.setLongTermMemory(this.memoryStore);
+    }
+
+    const runtime = new AgentRuntime({
+      id: config.id,
+      ai: this.ai!,
+      mcp: this.mcp,
+      bus: config.bus || this.globalBus,
+      memory,
+      sharedMemory: this.sharedMemory,
+      vault: this.vault,
+      onAction: (a) => this.actionListeners.forEach(l => l(a)),
+      onLog: (l) => this.logListeners.forEach(listener => listener(l)),
+      onActionResult: (r) => this.actionResultListeners.forEach(l => l(r)),
+      systemTools: this.systemTools,
+    });
+
+    new TaskAgentRuntimeAdapter(runtime, config.bus || this.globalBus, config);
+    return runtime;
+  }
+
+  private async recoverTasks() {
+    if (!this.orchestrator || !this.checkpointManager) return;
+    const checkpoints = await this.checkpointManager.listCheckpoints();
+    for (const checkpoint of checkpoints) {
+      const task = this.orchestrator.getTask(checkpoint.taskId);
+      if (task && (task.status === "running" || task.status === "paused")) {
+        await this.checkpointManager.restoreTask(checkpoint.taskId);
+      }
+    }
+  }
+
+  private registerTaskTools() {
+    this.registerSystemTool(
+      {
+        name: "kairo_create_long_task",
+        description: "创建一个长程任务，由专门的 Task Agent 在后台执行",
+        inputSchema: {
+          type: "object",
+          properties: {
+            description: { type: "string", description: "任务描述" },
+            totalSteps: { type: "number", description: "总步骤数" },
+            context: { type: "object", description: "任务上下文（可选）" },
+            checkpointInterval: {
+              type: "number",
+              description: "检查点间隔（默认10）",
+              default: 10,
+            },
+          },
+          required: ["description", "totalSteps"],
+        },
+      },
+      async (args: any, context: any) => {
+        if (!this.orchestrator) {
+          throw new Error("Task orchestrator not initialized");
+        }
+        const task = this.orchestrator.createTask({
+          type: TaskType.LONG,
+          description: args.description,
+          agentId: context?.agentId || this.activeAgentId,
+          context: {
+            totalSteps: args.totalSteps,
+            currentStep: 0,
+            ...(args.context || {}),
+          },
+          config: {
+            autoResume: true,
+            checkpointInterval: args.checkpointInterval || 10,
+          },
+          correlationId: context?.correlationId,
+        });
+
+        this.orchestrator.startTask(task.id);
+        this.orchestrator.updateProgress(task.id, {
+          current: 0,
+          total: Number(args.totalSteps) || 0,
+          message: "任务已创建",
+        });
+
+        return {
+          taskId: task.id,
+          message: "长程任务已创建，Task Agent 将在后台执行",
+        };
+      },
+    );
+
+    this.registerSystemTool(
+      {
+        name: "kairo_query_task_status",
+        description: "查询长程任务的执行状态",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: { type: "string", description: "任务ID（可选）" },
+          },
+        },
+      },
+      async (args: any, context: any) => {
+        if (!this.orchestrator) {
+          throw new Error("Task orchestrator not initialized");
+        }
+        if (args?.taskId) {
+          const task = this.orchestrator.getTask(args.taskId);
+          return task || { error: "Task not found" };
+        }
+
+        const agentId = context?.agentId || this.activeAgentId;
+        const activeTasks = this.orchestrator.getActiveTasks(agentId);
+        return {
+          activeTasks: activeTasks.map(t => ({
+            id: t.id,
+            description: t.description,
+            status: t.status,
+            progress: t.progress,
+          })),
+        };
+      },
+    );
+
+    this.registerSystemTool(
+      {
+        name: "kairo_cancel_task",
+        description: "取消正在执行的长程任务",
+        inputSchema: {
+          type: "object",
+          properties: {
+            taskId: { type: "string", description: "任务ID" },
+            reason: { type: "string", description: "取消原因（可选）" },
+          },
+          required: ["taskId"],
+        },
+      },
+      async (args: any) => {
+        if (!this.orchestrator) {
+          throw new Error("Task orchestrator not initialized");
+        }
+        this.orchestrator.cancelTask(args.taskId, args.reason);
+        return { message: `任务 ${args.taskId} 已取消` };
+      },
+    );
   }
 
   private spawnAgent(id: string, memory?: AgentMemory) {
