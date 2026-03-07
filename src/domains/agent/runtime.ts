@@ -838,6 +838,9 @@ export class AgentRuntime {
 - After delegation, use "say" to clearly inform the user the task is running in background and they can continue asking other questions.
 - If user asks for progress and tool "${hasQueryTaskTool ? "kairo_query_task_status" : "kairo_create_long_task"}" is available, query task status and report concise progress.
 - If user asks to stop background task and tool "${hasCancelTaskTool ? "kairo_cancel_task" : "kairo_create_long_task"}" is available, cancel it and confirm.
+- You must actively inspect Task Agent outputs and progress artifacts by yourself.
+- If you detect abnormal states (e.g. repeated same outputs, no real progress across multiple reports, obvious loop or persistent execution errors), proactively stop that Task Agent via tool "${hasCancelTaskTool ? "kairo_cancel_task" : "kairo_create_long_task"}" with a clear reason, without waiting for user instruction.
+- After proactive stopping, immediately explain to the user why it was stopped and what you will do next.
 - Do not pretend delegation happened. Use actual tool calls.
 ` : "";
 
