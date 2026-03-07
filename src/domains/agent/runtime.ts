@@ -999,23 +999,13 @@ Or if no action is needed (waiting for user):
     if (fallbackContent.length > 0) {
       return {
         thought: "Model returned non-JSON response, auto-correcting",
-        action: {
-          type: "say",
-          content: "响应格式错误，正在自动纠正并重试。",
-          continue: true,
-          continueReason: "response_parse_failed",
-        },
+        action: this.createAutoCorrectionSayAction("response_parse_failed"),
       };
     }
 
     return {
       thought: "Failed to parse response, auto-correcting",
-      action: {
-        type: "say",
-        content: "响应格式错误，正在自动纠正并重试。",
-        continue: true,
-        continueReason: "response_parse_failed",
-      }
+      action: this.createAutoCorrectionSayAction("response_parse_failed"),
     };
   }
 
@@ -1099,13 +1089,27 @@ Or if no action is needed (waiting for user):
   }
 
   private normalizeParsedResponse(parsed: any): { thought: string; action: any } {
-    const thought = typeof parsed?.thought === "string" && parsed.thought.trim().length > 0
-      ? parsed.thought
-      : "No thought provided";
+    const hasThought = typeof parsed?.thought === "string" && parsed.thought.trim().length > 0;
+    const thought = hasThought ? parsed.thought : "No thought provided";
     const action = typeof parsed?.action === "object" && parsed.action !== null
       ? parsed.action
       : { type: "noop" };
+    if (!hasThought && action.type === "noop") {
+      return {
+        thought: "Missing thought in model response, auto-correcting",
+        action: this.createAutoCorrectionSayAction("missing_thought"),
+      };
+    }
     return { thought, action };
+  }
+
+  private createAutoCorrectionSayAction(reason: string) {
+    return {
+      type: "say",
+      content: "响应格式错误，正在自动纠正并重试。",
+      continue: true,
+      continueReason: reason,
+    };
   }
 
   private extractJsonCandidates(content: string): string[] {

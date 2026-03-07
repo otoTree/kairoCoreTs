@@ -407,6 +407,41 @@ describe("AgentRuntime (Event Driven)", () => {
     runtime.stop();
   });
 
+  it("should auto-continue when thought is missing and action is noop", async () => {
+    runtime.start();
+    const actionEvents: any[] = [];
+    const continueEvents: any[] = [];
+    bus.subscribe("kairo.agent.action", (e) => {
+      actionEvents.push(e);
+    });
+    bus.subscribe("kairo.agent.internal.continue", (e) => {
+      continueEvents.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({ action: { type: "noop" } }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "测试 thought 缺失自动继续" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 80));
+
+    expect(actionEvents).toHaveLength(1);
+    expect(actionEvents[0]?.data?.action?.type).toBe("say");
+    expect(actionEvents[0]?.data?.action?.continue).toBe(true);
+    expect(actionEvents[0]?.data?.action?.content).toBe("响应格式错误，正在自动纠正并重试。");
+    expect(continueEvents).toHaveLength(1);
+    expect(continueEvents[0]?.data?.reason).toBe("missing_thought");
+    expect(mockChat).toHaveBeenCalledTimes(2);
+
+    runtime.stop();
+  });
+
   it("should pass maxTokens to ai chat calls", async () => {
     const runtimeWithMaxTokens = new AgentRuntime({
       ai: mockAI,
