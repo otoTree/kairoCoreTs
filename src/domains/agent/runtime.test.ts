@@ -323,6 +323,34 @@ describe("AgentRuntime (Event Driven)", () => {
     runtime.stop();
   });
 
+  it("should recover truncated fenced JSON response", async () => {
+    runtime.start();
+    const actionEvents: any[] = [];
+    bus.subscribe("kairo.agent.action", (e) => {
+      actionEvents.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: `\`\`\`markdown
+{"thought":"继续执行","action":{"type":"tool_call","function":{"name":"kairo_terminal_exec","arguments":{"sessionId":"main","command":"cat > /app/skills/short-drama-generator/SKILL.md << 'EOF'\\n标题"}}`,
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "测试截断 JSON 恢复" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 100));
+
+    expect(actionEvents).toHaveLength(1);
+    expect(actionEvents[0]?.data?.action?.type).toBe("tool_call");
+    expect(actionEvents[0]?.data?.action?.function?.name).toBe("kairo_terminal_exec");
+
+    runtime.stop();
+  });
+
   it("should fallback to say when model returns plain text", async () => {
     runtime.start();
     const actionEvents: any[] = [];

@@ -722,7 +722,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
   }
 
   private async sendPostMessage(chatId: string, title: string, lines: string[]) {
-    const rows = lines.slice(0, 30).map((line) => [{ tag: "text", text: line }]);
+    const rows = lines.slice(0, 30).map((line) => [{ tag: "markdown", text: line }]);
     if (rows.length === 0) {
       return;
     }

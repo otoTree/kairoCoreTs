@@ -86,6 +86,7 @@ export class AgentRuntime {
   private lastSaySignature: string | null = null;
   private repeatedSayCount: number = 0;
   private static readonly MAX_REPEATED_SAY_COUNT = 2;
+  private static readonly MAX_FALLBACK_SAY_CHARS = 3000000;
   private static readonly DEFAULT_CONTEXT_TOKENS = 40000;
   private static readonly CONTEXT_COMPRESSION_RATIO = 0.8;
   private static readonly CHARS_PER_TOKEN = 2.5;
@@ -946,6 +947,11 @@ Or if no action is needed (waiting for user):
       }
     }
 
+    const recoveredParsed = this.tryRecoverTruncatedJson(normalizedContent);
+    if (recoveredParsed) {
+      return this.normalizeParsedResponse(recoveredParsed);
+    }
+
     console.error("Failed to parse response:", content);
     const fallbackContent = normalizedContent.trim();
     if (fallbackContent.length > 0) {
@@ -953,7 +959,7 @@ Or if no action is needed (waiting for user):
         thought: "Model returned non-JSON response",
         action: {
           type: "say",
-          content: fallbackContent.slice(0, 4000),
+          content: fallbackContent.slice(0, AgentRuntime.MAX_FALLBACK_SAY_CHARS),
         },
       };
     }
@@ -978,6 +984,69 @@ Or if no action is needed (waiting for user):
     } catch {
       return null;
     }
+  }
+
+  private tryRecoverTruncatedJson(content: string): any | null {
+    const firstBraceIndex = content.indexOf("{");
+    if (firstBraceIndex < 0) return null;
+    const candidate = content.slice(firstBraceIndex).trim();
+    if (!candidate) return null;
+    const repaired = this.repairPossiblyTruncatedJson(candidate);
+    if (!repaired) return null;
+    return this.tryParseJson(repaired);
+  }
+
+  private repairPossiblyTruncatedJson(content: string): string | null {
+    let inString = false;
+    let escaped = false;
+    const stack: string[] = [];
+    let output = "";
+
+    for (let i = 0; i < content.length; i++) {
+      const char = content[i];
+      output += char;
+
+      if (char === "\\" && inString) {
+        escaped = !escaped;
+        continue;
+      }
+
+      if (char === "\"" && !escaped) {
+        inString = !inString;
+      }
+      escaped = false;
+
+      if (inString) continue;
+
+      if (char === "{") {
+        stack.push("}");
+        continue;
+      }
+
+      if (char === "[") {
+        stack.push("]");
+        continue;
+      }
+
+      if (char === "}" || char === "]") {
+        const expected = stack[stack.length - 1];
+        if (expected !== char) {
+          return null;
+        }
+        stack.pop();
+      }
+    }
+
+    if (inString) {
+      if (escaped) output += "\\";
+      output += "\"";
+    }
+
+    while (stack.length > 0) {
+      output += stack.pop();
+    }
+
+    return output;
   }
 
   private normalizeParsedResponse(parsed: any): { thought: string; action: any } {
