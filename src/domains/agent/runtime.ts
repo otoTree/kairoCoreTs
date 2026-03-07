@@ -82,6 +82,7 @@ export class AgentRuntime {
 
   // 自动继续标志：用于 say 动作后自动触发下一个 Tick
   private shouldAutoContinue: boolean = false;
+  private autoContinueReason: string = "auto_continue_after_say";
   private autoContinueStreak: number = 0;
   private lastSaySignature: string | null = null;
   private repeatedSayCount: number = 0;
@@ -357,6 +358,8 @@ export class AgentRuntime {
       // 检查是否需要自动继续
       if (this.shouldAutoContinue) {
         this.shouldAutoContinue = false; // 重置标志
+        const continueReason = this.autoContinueReason;
+        this.autoContinueReason = "auto_continue_after_say";
         this.log(`Auto-continuing after say action...`);
 
         // 使用 setTimeout 避免同步递归，让事件循环有机会处理其他事件
@@ -366,7 +369,7 @@ export class AgentRuntime {
             this.publish({
               type: "kairo.agent.internal.continue",
               source: "agent:" + this.id,
-              data: { reason: "auto_continue_after_say" }
+              data: { reason: continueReason }
             });
           }
         }, 0);
@@ -518,9 +521,13 @@ export class AgentRuntime {
               this.autoContinueStreak += 1;
               // 设置自动继续标志
               this.shouldAutoContinue = true;
+              this.autoContinueReason = typeof action.continueReason === "string" && action.continueReason.trim().length > 0
+                ? action.continueReason
+                : "auto_continue_after_say";
               this.log(`Say action detected follow-up intent, will auto-continue`);
           } else {
               this.autoContinueStreak = 0;
+              this.autoContinueReason = "auto_continue_after_say";
               // 没有后续意图，正常结束
               this.publish({
                   type: "kairo.intent.ended",
@@ -991,17 +998,24 @@ Or if no action is needed (waiting for user):
     const fallbackContent = normalizedContent.trim();
     if (fallbackContent.length > 0) {
       return {
-        thought: "Model returned non-JSON response",
+        thought: "Model returned non-JSON response, auto-correcting",
         action: {
           type: "say",
-          content: fallbackContent.slice(0, AgentRuntime.MAX_FALLBACK_SAY_CHARS),
+          content: "响应格式错误，正在自动纠正并重试。",
+          continue: true,
+          continueReason: "response_parse_failed",
         },
       };
     }
 
     return {
-      thought: "Failed to parse response",
-      action: { type: "noop" }
+      thought: "Failed to parse response, auto-correcting",
+      action: {
+        type: "say",
+        content: "响应格式错误，正在自动纠正并重试。",
+        continue: true,
+        continueReason: "response_parse_failed",
+      }
     };
   }
 

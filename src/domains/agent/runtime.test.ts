@@ -375,8 +375,12 @@ describe("AgentRuntime (Event Driven)", () => {
   it("should fallback to say when model returns plain text", async () => {
     runtime.start();
     const actionEvents: any[] = [];
+    const continueEvents: any[] = [];
     bus.subscribe("kairo.agent.action", (e) => {
       actionEvents.push(e);
+    });
+    bus.subscribe("kairo.agent.internal.continue", (e) => {
+      continueEvents.push(e);
     });
 
     mockChat.mockResolvedValueOnce({
@@ -394,7 +398,11 @@ describe("AgentRuntime (Event Driven)", () => {
 
     expect(actionEvents).toHaveLength(1);
     expect(actionEvents[0]?.data?.action?.type).toBe("say");
-    expect(actionEvents[0]?.data?.action?.content).toContain("这是普通文本响应");
+    expect(actionEvents[0]?.data?.action?.continue).toBe(true);
+    expect(actionEvents[0]?.data?.action?.content).toBe("响应格式错误，正在自动纠正并重试。");
+    expect(continueEvents).toHaveLength(1);
+    expect(continueEvents[0]?.data?.reason).toBe("response_parse_failed");
+    expect(mockChat).toHaveBeenCalledTimes(2);
 
     runtime.stop();
   });
