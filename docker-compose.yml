@@ -19,5 +19,6 @@ services:
       - ./deliverables:/app/deliverables
       - ./memory:/app/memory
       - ./data/memory:/app/data/memory
+      - ./data/sqlite:/app/data/sqlite
       - ./.run:/app/.run
     restart: unless-stopped

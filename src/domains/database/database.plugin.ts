@@ -1,4 +1,5 @@
 import path from 'path';
+import fs from 'fs';
 import type { Plugin } from '../../core/plugin';
 import { initDatabase, closeDatabase } from './client';
 import { migrateToLatest } from './migrator';
@@ -10,7 +11,8 @@ export class DatabasePlugin implements Plugin {
   async setup(app: any) {
     const dbPath = process.env.SQLITE_DB_PATH 
       ? path.resolve(process.cwd(), process.env.SQLITE_DB_PATH)
-      : path.resolve(process.cwd(), 'kairo.db');
+      : path.resolve(process.cwd(), 'data/sqlite/kairo.db');
+    fs.mkdirSync(path.dirname(dbPath), { recursive: true });
     console.log(`[Database] Initializing SQLite at ${dbPath}`);
     
     const db = initDatabase(dbPath);
