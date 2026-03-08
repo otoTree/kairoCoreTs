@@ -13,7 +13,6 @@ export interface TaskAgentConfig {
   parentAgentId: string;
   description: string;
   context: Record<string, any>;
-  progressReportInterval?: number; // 进度报告间隔（毫秒）
   bus?: EventBus;
 }
 
@@ -134,8 +133,6 @@ export class TaskAgentManager {
         parentAgentId: task.agentId,
         description: task.description,
         context: task.context || {},
-        progressReportInterval: task.config?.checkpointInterval ?
-          task.config.checkpointInterval * 1000 : 5000, // 默认 5 秒
         bus: localBus,
       });
 

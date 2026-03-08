@@ -12,7 +12,6 @@ export class TaskAgentRuntimeAdapter {
   private bus: EventBus;
   private config: TaskAgentConfig;
 
-  private progressReportTimer?: NodeJS.Timeout;
   private lastProgress?: { current: number; total: number };
 
   constructor(runtime: AgentRuntime, bus: EventBus, config: TaskAgentConfig) {
@@ -20,21 +19,7 @@ export class TaskAgentRuntimeAdapter {
     this.bus = bus;
     this.config = config;
 
-    this.setupProgressReporting();
     this.interceptActions();
-  }
-
-  /**
-   * 设置自动进度报告
-   */
-  private setupProgressReporting() {
-    const interval = this.config.progressReportInterval || 5000;
-
-    this.progressReportTimer = setInterval(() => {
-      if (this.lastProgress) {
-        this.reportProgress(this.lastProgress, "定期进度报告");
-      }
-    }, interval);
   }
 
   /**
@@ -112,11 +97,6 @@ export class TaskAgentRuntimeAdapter {
    * 报告完成
    */
   private reportCompletion(result?: any) {
-    if (this.progressReportTimer) {
-      clearInterval(this.progressReportTimer);
-      this.progressReportTimer = undefined;
-    }
-
     this.bus.publish({
       type: "kairo.task.agent.completed",
       source: `task-agent:${this.config.id}`,
@@ -146,11 +126,6 @@ export class TaskAgentRuntimeAdapter {
    * 报告错误
    */
   reportError(error: any) {
-    if (this.progressReportTimer) {
-      clearInterval(this.progressReportTimer);
-      this.progressReportTimer = undefined;
-    }
-
     this.bus.publish({
       type: "kairo.task.agent.completed",
       source: `task-agent:${this.config.id}`,
@@ -167,9 +142,6 @@ export class TaskAgentRuntimeAdapter {
    * 清理资源
    */
   dispose() {
-    if (this.progressReportTimer) {
-      clearInterval(this.progressReportTimer);
-      this.progressReportTimer = undefined;
-    }
+    return;
   }
 }
