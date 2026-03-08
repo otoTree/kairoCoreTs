@@ -3,7 +3,7 @@ import { rootLogger } from "../observability/logger";
 import type { Logger } from "../observability/types";
 import { TaskStatus, type TaskOrchestrator } from "./task-orchestrator";
 import { readFile } from "node:fs/promises";
-import { resolve as resolvePath } from "node:path";
+import { relative, resolve as resolvePath } from "node:path";
 import { spawn } from "node:child_process";
 
 export interface ReviewRequest {
@@ -25,6 +25,14 @@ export interface ReviewVerdict {
   reviewedAt: number;
 }
 
+type ReviewToolResult = {
+  ok: boolean;
+  detail?: string;
+  data?: any;
+};
+
+type ReviewToolHandler = (input: Record<string, any>) => Promise<ReviewToolResult>;
+
 export class ReviewAgent {
   private bus: EventBus;
   private orchestrator: TaskOrchestrator;
@@ -32,11 +40,13 @@ export class ReviewAgent {
   private unsubscribers: Array<() => void> = [];
   private latestProgress = new Map<string, { current: number; total: number; timestamp: number }>();
   private latestSayContentByAgent = new Map<string, string>();
+  private reviewTools = new Map<string, ReviewToolHandler>();
 
   constructor(bus: EventBus, orchestrator: TaskOrchestrator) {
     this.bus = bus;
     this.orchestrator = orchestrator;
     this.logger = rootLogger.child({ component: "ReviewAgent" });
+    this.registerBuiltInReviewTools();
     this.start();
   }
 
@@ -144,6 +154,7 @@ export class ReviewAgent {
       data: {
         scope: "agent-finish",
         agentId,
+        result: action.result,
         claimText: typeof action.result === "string" ? action.result : undefined,
         lastSayContent: this.latestSayContentByAgent.get(agentId),
       },
@@ -208,28 +219,156 @@ export class ReviewAgent {
         reasons.push("expected_path_not_confirmed");
       }
       if (expectedPaths.length > 0) {
-        const verified = await this.verifyArtifactPaths(expectedPaths);
-        if (!verified) {
+        const verification = await this.verifyArtifactPaths(expectedPaths);
+        if (verification.missingPaths.length > 0) {
           reasons.push("expected_artifact_unverified");
+          reasons.push(`missing_artifact_paths:${verification.missingPaths.join(",")}`);
+        }
+        const workspacePaths = expectedPaths
+          .map(path => this.normalizePath(path))
+          .filter(path => this.isPathInWorkspace(path));
+        if (workspacePaths.length > 0) {
+          const diffCheck = await this.runReviewTool("git_diff_paths_changed", { paths: workspacePaths });
+          if (!diffCheck.ok) {
+            reasons.push("git_diff_no_changes");
+            if (Array.isArray(diffCheck.data?.unchangedPaths) && diffCheck.data.unchangedPaths.length > 0) {
+              reasons.push(`git_diff_unchanged_paths:${diffCheck.data.unchangedPaths.join(",")}`);
+            }
+          }
+        }
+      }
+    }
+    const commitRequest = this.parseCommitRequest(request);
+    if (commitRequest.autoCommit) {
+      if (reasons.length > 0) {
+        reasons.push("commit_blocked_by_review");
+      } else {
+        const commitResult = await this.runReviewTool("git_commit", {
+          message: commitRequest.commitMessage,
+        });
+        if (!commitResult.ok) {
+          reasons.push("git_commit_failed");
+          if (typeof commitResult.detail === "string" && commitResult.detail.length > 0) {
+            reasons.push(`git_commit_error:${commitResult.detail}`);
+          }
         }
       }
     }
     return this.buildVerdict(reasons.length === 0, "agent-finish", request.taskId, request.agentId, reasons);
   }
 
-  private async verifyArtifactPaths(paths: string[]): Promise<boolean> {
-    for (const path of paths) {
-      const normalized = this.normalizePath(path);
-      const readable = await this.tryReadFile(normalized);
-      if (readable) {
-        return true;
+  private registerBuiltInReviewTools() {
+    this.reviewTools.set("read_file", async (input) => {
+      const normalized = this.normalizePath(String(input.path || ""));
+      const ok = await this.tryReadFile(normalized);
+      return { ok, detail: ok ? undefined : "read_failed" };
+    });
+    this.reviewTools.set("shell_exists", async (input) => {
+      const normalized = this.normalizePath(String(input.path || ""));
+      const ok = await this.checkPathByShell(normalized);
+      return { ok, detail: ok ? undefined : "shell_not_found" };
+    });
+    this.reviewTools.set("git_diff_paths_changed", async (input) => {
+      const paths = Array.isArray(input.paths) ? input.paths.map(item => String(item)) : [];
+      const repoOk = await this.ensureGitRepo();
+      if (!repoOk.ok) {
+        return { ok: false, detail: repoOk.detail };
       }
-      const shellOk = await this.checkPathByShell(normalized);
-      if (shellOk) {
+      if (paths.length === 0) {
+        return { ok: false, detail: "no_paths" };
+      }
+      const workspaceRoot = process.cwd();
+      const pathSpecs = paths
+        .filter(path => this.isPathInWorkspace(path))
+        .map(path => this.quoteShellArg(relative(workspaceRoot, path)));
+      if (pathSpecs.length === 0) {
+        return { ok: false, detail: "no_workspace_paths" };
+      }
+
+      const base = `git -C ${this.quoteShellArg(workspaceRoot)}`;
+      const changedTracked = await this.runShellDetailed(`${base} diff --name-only HEAD -- ${pathSpecs.join(" ")}`);
+      const changedUntracked = await this.runShellDetailed(`${base} ls-files --others --exclude-standard -- ${pathSpecs.join(" ")}`);
+
+      const changed = new Set<string>();
+      for (const line of [changedTracked.stdout, changedUntracked.stdout].join("\n").split("\n")) {
+        const value = line.trim();
+        if (value.length > 0) {
+          changed.add(resolvePath(workspaceRoot, value));
+        }
+      }
+      const unchangedPaths = paths.filter(path => !changed.has(path));
+      return {
+        ok: unchangedPaths.length === 0,
+        data: {
+          changedPaths: Array.from(changed.values()),
+          unchangedPaths,
+        },
+      };
+    });
+    this.reviewTools.set("git_commit", async (input) => {
+      const repoOk = await this.ensureGitRepo();
+      if (!repoOk.ok) {
+        return { ok: false, detail: repoOk.detail };
+      }
+      const message = typeof input.message === "string" && input.message.trim().length > 0
+        ? input.message.trim()
+        : "chore: auto commit after review pass";
+      const workspaceRoot = process.cwd();
+      const base = `git -C ${this.quoteShellArg(workspaceRoot)}`;
+      const addResult = await this.runShellDetailed(`${base} add -A`);
+      if (addResult.exitCode !== 0) {
+        return { ok: false, detail: addResult.stderr || "git_add_failed" };
+      }
+      const diffCached = await this.runShellDetailed(`${base} diff --cached --name-only`);
+      if (diffCached.stdout.trim().length === 0) {
+        return { ok: false, detail: "no_staged_changes" };
+      }
+      const commitResult = await this.runShellDetailed(`${base} commit -m ${this.quoteShellArg(message)}`);
+      if (commitResult.exitCode !== 0) {
+        return { ok: false, detail: commitResult.stderr || commitResult.stdout || "git_commit_failed" };
+      }
+      return { ok: true };
+    });
+  }
+
+  private async runReviewTool(name: string, input: Record<string, any>): Promise<ReviewToolResult> {
+    const handler = this.reviewTools.get(name);
+    if (!handler) {
+      return { ok: false, detail: "tool_not_found" };
+    }
+    try {
+      return await handler(input);
+    } catch (error) {
+      return {
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  private async verifyArtifactPath(path: string): Promise<boolean> {
+    const steps = ["read_file", "shell_exists"];
+    for (const step of steps) {
+      const result = await this.runReviewTool(step, { path });
+      if (result.ok) {
         return true;
       }
     }
     return false;
+  }
+
+  private async verifyArtifactPaths(paths: string[]): Promise<{ verifiedPaths: string[]; missingPaths: string[] }> {
+    const verifiedPaths: string[] = [];
+    const missingPaths: string[] = [];
+    for (const path of paths) {
+      const verified = await this.verifyArtifactPath(path);
+      if (verified) {
+        verifiedPaths.push(path);
+      } else {
+        missingPaths.push(path);
+      }
+    }
+    return { verifiedPaths, missingPaths };
   }
 
   private normalizePath(path: string): string {
@@ -240,6 +379,35 @@ export class ReviewAgent {
       return path;
     }
     return resolvePath(process.cwd(), path);
+  }
+
+  private isPathInWorkspace(path: string): boolean {
+    const workspaceRoot = process.cwd();
+    const normalized = this.normalizePath(path);
+    const rel = relative(workspaceRoot, normalized);
+    return rel === "" || (!rel.startsWith("..") && !rel.startsWith("../"));
+  }
+
+  private parseCommitRequest(request: ReviewRequest): { autoCommit: boolean; commitMessage?: string } {
+    if (!request.result || typeof request.result !== "object") {
+      return { autoCommit: false };
+    }
+    const value = request.result as Record<string, any>;
+    if (value.autoCommit === true) {
+      return {
+        autoCommit: true,
+        commitMessage: typeof value.commitMessage === "string" ? value.commitMessage : undefined,
+      };
+    }
+    return { autoCommit: false };
+  }
+
+  private async ensureGitRepo(): Promise<ReviewToolResult> {
+    const result = await this.runShellDetailed(`git -C ${this.quoteShellArg(process.cwd())} rev-parse --is-inside-work-tree`);
+    if (result.exitCode !== 0 || result.stdout.trim() !== "true") {
+      return { ok: false, detail: "not_git_repo" };
+    }
+    return { ok: true };
   }
 
   private async tryReadFile(filePath: string): Promise<boolean> {
@@ -271,6 +439,36 @@ export class ReviewAgent {
       });
       child.on("error", () => {
         resolve({ exitCode: 1 });
+      });
+    });
+  }
+
+  private async runShellDetailed(command: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+    return await new Promise(resolve => {
+      const child = spawn("sh", ["-lc", command], {
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      child.stdout.on("data", chunk => {
+        stdout += chunk.toString();
+      });
+      child.stderr.on("data", chunk => {
+        stderr += chunk.toString();
+      });
+      child.on("close", code => {
+        resolve({
+          exitCode: typeof code === "number" ? code : 1,
+          stdout,
+          stderr,
+        });
+      });
+      child.on("error", error => {
+        resolve({
+          exitCode: 1,
+          stdout,
+          stderr: `${stderr}${String(error)}`,
+        });
       });
     });
   }

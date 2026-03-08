@@ -73,6 +73,78 @@ describe("ReviewAgent", () => {
     reviewAgent.stop();
   });
 
+  it("should reject finish when one expected file in multiple paths is missing", async () => {
+    const bus = new InMemoryGlobalBus(new RingBufferEventStore());
+    const orchestrator = new TaskOrchestrator(bus);
+    const reviewAgent = new ReviewAgent(bus, orchestrator);
+    const dir = await mkdtemp(join(tmpdir(), "kairo-review-multi-"));
+    const existingPath = join(dir, "existing.ts");
+    const missingPath = join(dir, "missing.ts");
+    await writeFile(existingPath, "export const ok = true;\n", "utf8");
+
+    const result = await bus.request<
+      { scope: string; agentId: string; claimText: string; lastSayContent: string },
+      { ok: boolean; reasons: string[] }
+    >("kairo.review.request", {
+      scope: "agent-finish",
+      agentId: "default",
+      claimText: `已生成并保存到 ${existingPath} 和 ${missingPath}`,
+      lastSayContent: `请分别生成并保存到 ${existingPath} ${missingPath}`,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("expected_artifact_unverified");
+    expect(result.reasons.some(reason => reason.includes(`missing_artifact_paths:${missingPath}`))).toBe(true);
+    await rm(dir, { recursive: true, force: true });
+    reviewAgent.stop();
+  });
+
+  it("should reject finish when workspace file has no git diff evidence", async () => {
+    const bus = new InMemoryGlobalBus(new RingBufferEventStore());
+    const orchestrator = new TaskOrchestrator(bus);
+    const reviewAgent = new ReviewAgent(bus, orchestrator);
+    const workspaceFile = join(process.cwd(), "package.json");
+
+    const result = await bus.request<
+      { scope: string; agentId: string; claimText: string; lastSayContent: string },
+      { ok: boolean; reasons: string[] }
+    >("kairo.review.request", {
+      scope: "agent-finish",
+      agentId: "default",
+      claimText: `已生成并保存到 ${workspaceFile}`,
+      lastSayContent: `请生成配置并写入 ${workspaceFile}`,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("git_diff_no_changes");
+    reviewAgent.stop();
+  });
+
+  it("should block auto commit when review is not passed", async () => {
+    const bus = new InMemoryGlobalBus(new RingBufferEventStore());
+    const orchestrator = new TaskOrchestrator(bus);
+    const reviewAgent = new ReviewAgent(bus, orchestrator);
+    const workspaceFile = join(process.cwd(), "package.json");
+
+    const result = await bus.request<
+      { scope: string; agentId: string; claimText: string; lastSayContent: string; result: any },
+      { ok: boolean; reasons: string[] }
+    >("kairo.review.request", {
+      scope: "agent-finish",
+      agentId: "default",
+      claimText: `已生成并保存到 ${workspaceFile}`,
+      lastSayContent: `请生成配置并写入 ${workspaceFile}`,
+      result: {
+        autoCommit: true,
+        commitMessage: "chore: test auto commit gate",
+      },
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reasons).toContain("commit_blocked_by_review");
+    reviewAgent.stop();
+  });
+
   it("should pass finish without artifact expectation", async () => {
     const bus = new InMemoryGlobalBus(new RingBufferEventStore());
     const orchestrator = new TaskOrchestrator(bus);
