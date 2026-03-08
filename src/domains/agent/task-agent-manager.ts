@@ -31,6 +31,11 @@ export interface TaskAgentState {
   lastProgressReport?: number;
 }
 
+export interface TaskAgentManagerOptions {
+  reviewEnabled?: boolean;
+  reviewTimeoutMs?: number;
+}
+
 class TaskAgentLocalEventStore implements EventStore {
   private events: KairoEvent[] = [];
 
@@ -64,16 +69,21 @@ export class TaskAgentManager {
 
   // Agent 工厂函数（由外部注入）
   private createAgentRuntime?: (config: TaskAgentConfig) => Promise<AgentRuntime>;
+  private reviewEnabled: boolean;
+  private reviewTimeoutMs: number;
 
   constructor(
     bus: EventBus,
     orchestrator: TaskOrchestrator,
-    createAgentRuntime?: (config: TaskAgentConfig) => Promise<AgentRuntime>
+    createAgentRuntime?: (config: TaskAgentConfig) => Promise<AgentRuntime>,
+    options: TaskAgentManagerOptions = {},
   ) {
     this.bus = bus;
     this.orchestrator = orchestrator;
     this.logger = rootLogger.child({ component: "TaskAgentManager" });
     this.createAgentRuntime = createAgentRuntime;
+    this.reviewEnabled = options.reviewEnabled === true;
+    this.reviewTimeoutMs = Math.max(20, options.reviewTimeoutMs || 200);
 
     this.setupEventHandlers();
   }
@@ -349,9 +359,36 @@ ${JSON.stringify(task.context, null, 2)}
     const state = this.taskAgents.get(taskAgentId);
     if (!state) return;
 
-    if (error) {
+    let completionError = error ? String(error) : undefined;
+    if (!completionError && this.reviewEnabled) {
+      try {
+        const review = await this.bus.request<
+          { scope: string; taskId: string; taskAgentId: string; result?: any },
+          { ok?: boolean; reasons?: string[] }
+        >(
+          "kairo.review.request",
+          {
+            scope: "task-completion",
+            taskId,
+            taskAgentId,
+            result,
+          },
+          this.reviewTimeoutMs,
+        );
+        if (review?.ok === false) {
+          const reason = Array.isArray(review.reasons) && review.reasons.length > 0
+            ? review.reasons.join("; ")
+            : "unknown_review_failure";
+          completionError = `Review 未通过: ${reason}`;
+        }
+      } catch (reviewError) {
+        this.logger.warn("task completion review timeout, fallback to complete", { taskId, reviewError });
+      }
+    }
+
+    if (completionError) {
       state.status = "failed";
-      this.orchestrator.failTask(taskId, error);
+      this.orchestrator.failTask(taskId, completionError);
     } else {
       state.status = "completed";
       this.orchestrator.completeTask(taskId, result);
@@ -360,8 +397,8 @@ ${JSON.stringify(task.context, null, 2)}
     // 通知主 agent
     const task = this.orchestrator.getTask(taskId);
     if (task) {
-      const message = error
-        ? `❌ Task Agent 执行失败: ${error}`
+      const message = completionError
+        ? `❌ Task Agent 执行失败: ${completionError}`
         : `✅ Task Agent 已完成任务: ${task.description}`;
 
       this.bus.publish({
@@ -372,7 +409,7 @@ ${JSON.stringify(task.context, null, 2)}
           taskId,
           taskAgentId,
           result,
-          error,
+          error: completionError,
         },
         correlationId: task.correlationId,
       });

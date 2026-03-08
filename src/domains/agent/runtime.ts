@@ -85,6 +85,7 @@ export class AgentRuntime {
   private autoContinueReason: string = "auto_continue_after_say";
   private autoContinueStreak: number = 0;
   private lastSaySignature: string | null = null;
+  private lastSayContent?: string;
   private repeatedSayCount: number = 0;
   private static readonly MAX_REPEATED_SAY_COUNT = 2;
   private static readonly MAX_FALLBACK_SAY_CHARS = 3000000;
@@ -489,6 +490,7 @@ export class AgentRuntime {
       let actionEventId: string | undefined;
 
       if (action.type === 'say') {
+          this.lastSayContent = typeof action.content === "string" ? action.content : undefined;
           // ACT: Publish Action Event (as progress, not completion)
           actionEventId = await this.publish({
               type: "kairo.agent.action",

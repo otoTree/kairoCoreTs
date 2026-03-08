@@ -304,11 +304,79 @@ describe("AgentRuntime (Event Driven)", () => {
       data: { content: "结束" }
     });
 
+    await new Promise(resolve => setTimeout(resolve, 160));
+
+    const ended = intentEvents.find(e => e.type === "kairo.intent.ended");
+    expect(ended).toBeDefined();
+    expect(ended.data.result).toBe("ok");
+
+    runtime.stop();
+  });
+
+  it("should still end intent when review fails asynchronously", async () => {
+    runtime.start();
+    const intentEvents: any[] = [];
+    const agentMessages: any[] = [];
+    bus.subscribe("kairo.intent.*", (e) => {
+      intentEvents.push(e);
+    });
+    bus.subscribe(`kairo.agent.${runtime.id}.message`, (e) => {
+      agentMessages.push(e);
+    });
+
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "任务完成，收尾",
+        action: { type: "finish", result: "ok" }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "结束" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 160));
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "review-agent",
+      data: { content: "[Review 未通过] evidence_missing" }
+    });
     await new Promise(resolve => setTimeout(resolve, 80));
 
     const ended = intentEvents.find(e => e.type === "kairo.intent.ended");
     expect(ended).toBeDefined();
     expect(ended.data.result).toBe("ok");
+    expect(agentMessages.some(m => (m.data as any)?.content?.includes("Review 未通过"))).toBe(true);
+
+    runtime.stop();
+  });
+
+  it("should not synchronously request review on finish", async () => {
+    runtime.start();
+    let requestCount = 0;
+    bus.subscribe("kairo.review.request", () => {
+      requestCount += 1;
+    });
+    mockChat.mockResolvedValueOnce({
+      content: JSON.stringify({
+        thought: "任务完成",
+        action: { type: "finish", result: "ok" }
+      }),
+      usage: { input: 0, output: 0, total: 0 }
+    });
+
+    await bus.publish({
+      type: `kairo.agent.${runtime.id}.message`,
+      source: "user",
+      data: { content: "现在可以结束" }
+    });
+
+    await new Promise(resolve => setTimeout(resolve, 160));
+
+    expect(requestCount).toBe(0);
 
     runtime.stop();
   });

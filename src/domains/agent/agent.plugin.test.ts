@@ -29,4 +29,28 @@ describe("AgentPlugin maxTokens config", () => {
     const plugin = new AgentPlugin() as any;
     expect(plugin.runtimeMaxTokens).toBeUndefined();
   });
+
+  it("should exclude feishu tools for task agents", () => {
+    const plugin = new AgentPlugin() as any;
+    plugin.systemTools = [
+      {
+        definition: { name: "kairo_feishu_send_file" },
+        handler: async () => ({}),
+      },
+      {
+        definition: { name: "kairo_file_patch" },
+        handler: async () => ({}),
+      },
+    ];
+
+    const tools = plugin.getTaskAgentSystemTools();
+    expect(tools.map((tool: any) => tool.definition.name)).toEqual(["kairo_file_patch"]);
+  });
+
+  it("should reject unnamed tools for task agents", () => {
+    const plugin = new AgentPlugin() as any;
+    expect(plugin.isTaskAgentToolAllowed(undefined)).toBe(false);
+    expect(plugin.isTaskAgentToolAllowed("")).toBe(false);
+    expect(plugin.isTaskAgentToolAllowed("kairo_create_long_task")).toBe(true);
+  });
 });

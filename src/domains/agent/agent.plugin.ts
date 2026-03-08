@@ -14,6 +14,7 @@ import { TaskOrchestrator, TaskStatus, TaskType } from "./task-orchestrator";
 import { TaskAgentManager, type TaskAgentConfig } from "./task-agent-manager";
 import { TaskAgentRuntimeAdapter } from "./task-agent-runtime-adapter";
 import { CheckpointManager } from "./checkpoint-manager";
+import { ReviewAgent } from "./review-agent";
 
 export class AgentPlugin implements Plugin {
   readonly name = "agent";
@@ -41,6 +42,7 @@ export class AgentPlugin implements Plugin {
   private orchestrator?: TaskOrchestrator;
   private taskAgentManager?: TaskAgentManager;
   private checkpointManager?: CheckpointManager;
+  private reviewAgent?: ReviewAgent;
   private cleanupTimer?: ReturnType<typeof setInterval>;
   private readonly runtimeMaxTokens?: number;
 
@@ -144,10 +146,12 @@ export class AgentPlugin implements Plugin {
     this.spawnAgent("default", this.memory);
     this.orchestrator = new TaskOrchestrator(this.globalBus);
     this.checkpointManager = new CheckpointManager(this.orchestrator, this.globalBus);
+    this.reviewAgent = new ReviewAgent(this.globalBus, this.orchestrator);
     this.taskAgentManager = new TaskAgentManager(
       this.globalBus,
       this.orchestrator,
       this.createTaskAgentRuntime.bind(this),
+      { reviewEnabled: true, reviewTimeoutMs: 200 },
     );
     await this.recoverTasks();
     this.registerTaskTools();
@@ -244,6 +248,10 @@ export class AgentPlugin implements Plugin {
         await this.taskAgentManager.stopTaskAgent(taskAgent.id);
       }
     }
+    if (this.reviewAgent) {
+      this.reviewAgent.stop();
+      this.reviewAgent = undefined;
+    }
     for (const agent of this.agents.values()) {
         agent.stop();
     }
@@ -268,11 +276,25 @@ export class AgentPlugin implements Plugin {
       onAction: (a) => this.actionListeners.forEach(l => l(a)),
       onLog: (l) => this.logListeners.forEach(listener => listener(l)),
       onActionResult: (r) => this.actionResultListeners.forEach(l => l(r)),
-      systemTools: this.systemTools,
+      systemTools: this.getTaskAgentSystemTools(),
     });
 
     new TaskAgentRuntimeAdapter(runtime, config.bus || this.globalBus, config);
     return runtime;
+  }
+
+  private getTaskAgentSystemTools(): SystemTool[] {
+    return this.systemTools.filter(tool => this.isTaskAgentToolAllowed(tool.definition?.name));
+  }
+
+  private isTaskAgentToolAllowed(toolName: unknown): boolean {
+    if (typeof toolName !== "string" || toolName.length === 0) {
+      return false;
+    }
+    if (toolName.startsWith("kairo_feishu_")) {
+      return false;
+    }
+    return true;
   }
 
   private async recoverTasks() {
