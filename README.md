@@ -105,6 +105,10 @@ bun run format
 - `SQLITE_DB_PATH`：SQLite 数据库文件路径
 - `KAIRO_CORS_ORIGINS`：允许跨域来源列表
 
+## 飞书渠道配置
+
+- 详见 `docs/feishu-channel-setup.md`
+
 ## 插件启动顺序（入口）
 
 入口位于 `src/index.ts`，启动时会依次注册并启动：

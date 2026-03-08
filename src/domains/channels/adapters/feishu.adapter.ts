@@ -7,7 +7,7 @@ import type {
   ChannelRouteRegistrar,
 } from "../types";
 import { mkdir, readFile, stat, writeFile } from "node:fs/promises";
-import { basename, join, resolve } from "node:path";
+import { basename, join, resolve as resolvePath } from "node:path";
 import { createDecipheriv, randomUUID } from "node:crypto";
 
 type FeishuApiPayload = { code?: number; msg?: string; [key: string]: any };
@@ -104,7 +104,48 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     registerPost(this.webhookPath, async (c) => this.handleWebhook(c));
   }
 
-  registerAgentTools(_registerTool: ChannelAgentToolRegistrar): void {}
+  registerAgentTools(registerTool: ChannelAgentToolRegistrar): void {
+    if (!this.appId || !this.appSecret) {
+      console.warn("[Channel:feishu] Skip registering file tool: app credentials missing");
+      return;
+    }
+    registerTool(
+      {
+        name: "kairo_feishu_send_file",
+        description: "发送本地文件到飞书会话。默认使用当前会话上下文。",
+        inputSchema: {
+          type: "object",
+          properties: {
+            filePath: { type: "string", description: "要发送的本地文件路径" },
+          },
+          required: ["filePath"],
+        },
+      },
+      async (args: any, context: any) => {
+        const rawFilePath = typeof args?.filePath === "string" ? args.filePath.trim() : "";
+        if (!rawFilePath) {
+          throw new Error("filePath is required");
+        }
+        if (typeof args?.chatId === "string" && args.chatId.trim()) {
+          throw new Error("chatId is not allowed");
+        }
+        const filePath = rawFilePath.startsWith("/") ? rawFilePath : resolvePath(process.cwd(), rawFilePath);
+        const chatId = this.resolveToolChatId(
+          typeof context?.correlationId === "string" ? context.correlationId : undefined,
+        );
+        if (!chatId) {
+          throw new Error("missing chat context");
+        }
+        await this.enqueueSendTask(chatId, async () => {
+          await this.sendFileMessage(chatId, filePath);
+        });
+        if (typeof context?.correlationId === "string" && context.correlationId) {
+          this.rememberContext(context.correlationId, chatId);
+        }
+        return { ok: true, chatId, filePath };
+      },
+    );
+  }
 
   async handleEvent(event: KairoEvent): Promise<void> {
     const correlationId = event.correlationId;
@@ -137,10 +178,6 @@ export class FeishuChannelAdapter implements ChannelAdapter {
           await this.sendMarkdownCardMessage(chatId, actionContent);
         } else {
           await this.sendEventMessage(chatId, event);
-        }
-        const filePaths = await this.collectExistingPaths(event, actionContent);
-        for (const filePath of filePaths) {
-          await this.sendFileMessage(chatId, filePath);
         }
         this.pendingChats.set(correlationId, chatId);
       });
@@ -531,18 +568,16 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       return;
     }
     const post = this.buildEventPost(event);
-    await this.sendPostMessage(chatId, post.title, post.lines);
+    await this.sendPostMessage(chatId, post.lines);
   }
 
-  private buildEventPost(event: KairoEvent): { title: string; lines: string[] } {
+  private buildEventPost(event: KairoEvent): {  lines: string[] } {
     const lines: string[] = [];
     const payloadLines = this.summarizeEventPayload(event);
     if (payloadLines.length > 0) {
-      lines.push("────────");
       lines.push(...payloadLines);
     }
     return {
-      title: this.getEventTitle(event.type),
       lines,
     };
   }
@@ -557,10 +592,10 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     if (event.type === "kairo.agent.action") {
       const action = this.getSayOrQueryAction(event);
       if (!action) return [];
-      const lines = [`⚡ 动作 · ${action.type}`];
+      const lines = [`动作 · ${action.type}`];
       const extracted = this.extractThoughtOrMessageText(action.content);
       const displayText = extracted || action.content;
-      lines.push("💬 内容");
+      lines.push("内容");
       lines.push(...this.toReadableLines(displayText, 1200).map((line) => `  ${line}`));
       return lines;
     }
@@ -570,7 +605,7 @@ export class FeishuChannelAdapter implements ChannelAdapter {
       if (!text) return [];
       const extracted = this.extractThoughtOrMessageText(text);
       const displayText = extracted || text;
-      return ["💬 消息", ...this.toReadableLines(displayText, 1200).map((line) => `  ${line}`)];
+      return [...this.toReadableLines(displayText, 1200).map((line) => `  ${line}`)];
     }
     return [];
   }
@@ -719,17 +754,11 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return rendered.length > maxLength ? `${rendered.slice(0, maxLength)}...` : rendered;
   }
 
-  private async sendPostMessage(chatId: string, title: string, lines: string[]) {
-    const rows = lines.slice(0, 30).map((line) => [{ tag: "text", text: line }]);
-    if (rows.length === 0) {
-      return;
-    }
-    await this.sendMessage("chat_id", chatId, "post", {
-      zh_cn: {
-        title: this.normalizeDisplayText(title).slice(0, 80),
-        content: rows,
-      },
-    });
+  private async sendPostMessage(chatId: string, lines: string[]) {
+    const messageLines = lines.slice(0, 30);
+    if (messageLines.length === 0) return;
+    const markdown = [...messageLines].join("\n");
+    await this.sendMarkdownCardMessage(chatId, markdown);
   }
 
   private async sendMarkdownCardMessage(chatId: string, content: string) {
@@ -966,52 +995,13 @@ export class FeishuChannelAdapter implements ChannelAdapter {
     return eventChatId?.trim() || "";
   }
 
-  private async collectExistingPaths(event: KairoEvent, content: string): Promise<string[]> {
-    const matches = new Set<string>();
-    this.collectPathCandidatesFromText(content, matches);
-    this.collectPathCandidatesFromValue((event as any)?.data, matches, 0);
-
-    const existing: string[] = [];
-    for (const filePath of matches) {
-      try {
-        const fileStats = await stat(filePath);
-        if (fileStats.isFile()) existing.push(filePath);
-      } catch {}
+  private resolveToolChatId(correlationId?: string): string {
+    const fixedChatId = this.fixedPrivateChatId?.trim();
+    if (fixedChatId) return fixedChatId;
+    if (correlationId) {
+      const mapped = this.pendingChats.get(correlationId);
+      if (mapped) return mapped;
     }
-    return existing;
-  }
-
-  private collectPathCandidatesFromValue(value: unknown, matches: Set<string>, depth: number) {
-    if (depth > 6) return;
-    if (typeof value === "string") {
-      this.collectPathCandidatesFromText(value, matches);
-      return;
-    }
-    if (Array.isArray(value)) {
-      for (const item of value.slice(0, 80)) {
-        this.collectPathCandidatesFromValue(item, matches, depth + 1);
-      }
-      return;
-    }
-    if (!value || typeof value !== "object") {
-      return;
-    }
-    const entries = Object.entries(value as Record<string, unknown>).slice(0, 80);
-    for (const [, item] of entries) {
-      this.collectPathCandidatesFromValue(item, matches, depth + 1);
-    }
-  }
-
-  private collectPathCandidatesFromText(content: string, matches: Set<string>) {
-    if (!content) return;
-    const pathRegex = /(?:^|\s)(\/[^\s"'`]+|\.\.?\/[^\s"'`]+)/g;
-    let found: RegExpExecArray | null = null;
-    while ((found = pathRegex.exec(content)) !== null) {
-      const raw = (found[1] || "").trim();
-      if (!raw) continue;
-      const cleaned = raw.replace(/[),.;:!?]+$/, "");
-      const absolute = cleaned.startsWith("/") ? cleaned : resolve(process.cwd(), cleaned);
-      matches.add(absolute);
-    }
+    return this.activeChatId || "";
   }
 }

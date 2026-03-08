@@ -830,6 +830,7 @@ export class AgentRuntime {
       const hasCreateLongTaskTool = this.systemTools.has("kairo_create_long_task");
       const hasQueryTaskTool = this.systemTools.has("kairo_query_task_status");
       const hasCancelTaskTool = this.systemTools.has("kairo_cancel_task");
+      const hasFeishuSendFileTool = this.systemTools.has("kairo_feishu_send_file");
       const longTaskGuidance = hasCreateLongTaskTool ? `
 
 【Long-Running Task Delegation】
@@ -842,6 +843,13 @@ export class AgentRuntime {
 - If you detect abnormal states (e.g. repeated same outputs, no real progress across multiple reports, obvious loop or persistent execution errors), proactively stop that Task Agent via tool "${hasCancelTaskTool ? "kairo_cancel_task" : "kairo_create_long_task"}" with a clear reason, without waiting for user instruction.
 - After proactive stopping, immediately explain to the user why it was stopped and what you will do next.
 - Do not pretend delegation happened. Use actual tool calls.
+` : "";
+      const channelFileGuidance = hasFeishuSendFileTool ? `
+
+【Channel File Delivery】
+- If you need to send a local file back to user in Feishu, call tool "kairo_feishu_send_file".
+- Do not assume channel adapters will auto-detect file paths from normal text output.
+- Prefer absolute local file paths when calling "kairo_feishu_send_file".
 ` : "";
 
       return `You are Kairo (Agent ${this.id}), an autonomous AI agent running on the user's local machine.
@@ -881,6 +889,7 @@ ${context}
 ${toolsContext}
 ${facts}
 ${longTaskGuidance}
+${channelFileGuidance}
 
 【Response Format】
 You must respond with a JSON object strictly. Do not include markdown code blocks (like \`\`\`json).
