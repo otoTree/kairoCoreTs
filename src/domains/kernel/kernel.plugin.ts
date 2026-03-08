@@ -12,6 +12,7 @@ import { CheckpointRepository } from "../database/repositories/checkpoint-reposi
 import { KernelStateManager } from "./state-manager";
 import { ServiceManager } from "./service-manager";
 import { DBusBridge } from "./dbus-bridge";
+import { applyLinePatch } from "./file-patch";
 
 import { Vault } from "../vault/vault";
 import { rootLogger } from "../observability/logger";
@@ -104,6 +105,7 @@ export class KernelPlugin implements Plugin {
 
       // Register System Tools
       this.registerTerminalTools(agentPlugin);
+      this.registerFileTools(agentPlugin);
       this.registerStateTools(agentPlugin);
       this.registerProcessIOTools(agentPlugin);
       this.registerServiceTools(agentPlugin);
@@ -111,7 +113,7 @@ export class KernelPlugin implements Plugin {
 
       // 启动 D-Bus 桥接
       await this.dbusBridge.connect(agentPlugin.globalBus).catch((e: unknown) => {
-        rootLogger.warn("[Kernel] D-Bus bridge failed to connect:", e);
+        rootLogger.warn("[Kernel] D-Bus bridge failed to connect:", { error: String(e) });
       });
 
     } catch (e) {
@@ -187,6 +189,38 @@ export class KernelPlugin implements Plugin {
     });
     
     rootLogger.info("[Kernel] Registered Terminal Tools");
+  }
+
+  private registerFileTools(agent: AgentPlugin) {
+    agent.registerSystemTool({
+      name: "kairo_file_patch",
+      description: "按行范围替换文件内容，只修改指定区域。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          filePath: { type: "string", description: "目标文件路径，可为相对 Workspace 的路径" },
+          startLine: { type: "number", description: "替换起始行（从 1 开始）" },
+          endLine: { type: "number", description: "替换结束行（包含）" },
+          replacement: { type: "string", description: "替换后的文本，可包含多行" },
+          expectedOriginal: { type: "string", description: "可选：期望的原始文本，用于并发保护" },
+          dryRun: { type: "boolean", description: "可选：仅预览是否会变更，不写入文件" },
+        },
+        required: ["filePath", "startLine", "endLine", "replacement"],
+      },
+    }, async (args) => {
+      const workspaceRoot = process.env.KAIRO_WORKSPACE_DIR || process.cwd();
+      return await applyLinePatch({
+        workspaceRoot,
+        filePath: args.filePath,
+        startLine: args.startLine,
+        endLine: args.endLine,
+        replacement: args.replacement,
+        expectedOriginal: args.expectedOriginal,
+        dryRun: args.dryRun,
+      });
+    });
+
+    rootLogger.info("[Kernel] Registered File Tools");
   }
 
   private registerStateTools(agent: AgentPlugin) {
