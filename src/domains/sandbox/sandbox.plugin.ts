@@ -2,7 +2,7 @@ import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
 import { SandboxManager } from "./sandbox-manager";
 import { PythonEnvManager } from "./python-env";
-import { AgentPlugin } from "../agent/agent.plugin";
+import { AgentPlugin } from "../agent";
 import * as path from "path";
 import * as fs from "fs/promises";
 import { spawn } from "child_process";

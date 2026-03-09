@@ -1,6 +1,6 @@
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import type { KernelPlugin } from "../kernel/kernel.plugin";
 import { AsyncTaskService } from "./async-task.service";
 

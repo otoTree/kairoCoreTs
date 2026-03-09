@@ -1,7 +1,7 @@
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
 import { ServerPlugin } from "../server/server.plugin";
-import { AgentPlugin } from "../agent/agent.plugin";
+import { AgentPlugin } from "../agent";
 import type { ChannelAdapter, ChannelInboundPublishInput } from "./types";
 import { FeishuChannelAdapter } from "./adapters/feishu.adapter";
 

@@ -1,11 +1,9 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { InMemoryGlobalBus, RingBufferEventStore } from "../events";
-import { TaskOrchestrator, TaskStatus, TaskType } from "./task-orchestrator";
-import { TaskAgentManager, type TaskAgentConfig } from "./task-agent-manager";
-import { TaskAgentRuntimeAdapter } from "./task-agent-runtime-adapter";
+import { TaskAgentManager, type TaskAgentConfig, TaskAgentRuntimeAdapter, TaskOrchestrator, TaskStatus, TaskType } from "./task";
 import { AgentRuntime } from "./runtime";
 import { InMemoryAgentMemory } from "./memory";
-import { ReviewAgent } from "./review-agent";
+import { ReviewAgent } from "./review";
 import type { AIPlugin } from "../ai/ai.plugin";
 import type { AIProvider } from "../ai/types";
 

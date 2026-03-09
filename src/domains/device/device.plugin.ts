@@ -3,7 +3,7 @@ import type { Application } from "../../core/app";
 import { DeviceMonitor } from "./monitor";
 import type { DeviceRegistry } from "./registry";
 import { DeviceManager } from "./manager";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import type { EventBus } from "../events/types";
 
 export class DevicePlugin implements Plugin {

@@ -3,7 +3,7 @@ import type { Application } from "../../core/app";
 import type { EventBus } from "../events/types";
 import type { RenderCommitEvent, SignalEvent, SurfaceState, UserActionEvent } from "./types";
 import { diffTree, type PatchOp } from "./ui-diff";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 
 export class CompositorPlugin implements Plugin {
   name = "compositor";

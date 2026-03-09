@@ -3,7 +3,7 @@ import { HealthPlugin } from "./domains/health/health.plugin";
 import { DatabasePlugin } from "./domains/database/database.plugin";
 import { AIPlugin } from "./domains/ai/ai.plugin";
 import { OpenAIProvider } from "./domains/ai/providers/openai";
-import { AgentPlugin } from "./domains/agent/agent.plugin";
+import { AgentPlugin } from "./domains/agent";
 import { ServerPlugin } from "./domains/server/server.plugin";
 import { SandboxPlugin } from "./domains/sandbox/sandbox.plugin";
 import { MCPPlugin } from "./domains/mcp/mcp.plugin";
@@ -22,6 +22,14 @@ import fs from "fs";
 
 const app = new Application();
 
+function migrateDirectoryIfNeeded(oldDir: string, newDir: string) {
+  if (!fs.existsSync(oldDir) || fs.existsSync(newDir)) {
+    return;
+  }
+  fs.mkdirSync(path.dirname(newDir), { recursive: true });
+  fs.cpSync(oldDir, newDir, { recursive: true });
+}
+
 // Bootstrap the application
 async function bootstrap() {
   try {
@@ -31,7 +39,11 @@ async function bootstrap() {
     const PYTHON_ENV_DIR = process.env.PYTHON_ENV_PATH || path.join(PROJECT_ROOT, "..", "kairo_python_env");
     const WORKSPACE_DIR = path.join(PROJECT_ROOT, "workspace");
     const DELIVERABLES_DIR = path.join(PROJECT_ROOT, "deliverables");
-    const SKILLS_DIR = path.join(PROJECT_ROOT, "skills");
+    const PERSIST_DIR = process.env.KAIRO_PERSIST_DIR || path.join(PROJECT_ROOT, "data");
+    const MEMORY_DIR = process.env.KAIRO_MEMORY_DIR || path.join(PERSIST_DIR, "memory");
+    const SKILLS_DIR = process.env.KAIRO_SKILLS_DIR || path.join(PERSIST_DIR, "skills");
+    const CHECKPOINT_DIR = process.env.KAIRO_CHECKPOINT_DIR || path.join(PERSIST_DIR, "checkpoints");
+    const MEMORY_ARCHIVE_DIR = process.env.KAIRO_MEMORY_ARCHIVE_DIR || path.join(MEMORY_DIR, "archives");
     const MCP_DIR = path.join(PROJECT_ROOT, "mcp");
     const fallbackRuntimeDir = path.join(PROJECT_ROOT, ".run", "kairo");
     let runtimeDir = process.env.KAIRO_RUNTIME_DIR || (process.platform === "linux" ? "/run/kairo" : fallbackRuntimeDir);
@@ -42,7 +54,12 @@ async function bootstrap() {
       runtimeDir = fallbackRuntimeDir;
       fs.mkdirSync(runtimeDir, { recursive: true });
     }
+    migrateDirectoryIfNeeded(path.join(PROJECT_ROOT, "skills"), SKILLS_DIR);
+    fs.mkdirSync(PERSIST_DIR, { recursive: true });
+    fs.mkdirSync(MEMORY_DIR, { recursive: true });
     fs.mkdirSync(SKILLS_DIR, { recursive: true });
+    fs.mkdirSync(CHECKPOINT_DIR, { recursive: true });
+    fs.mkdirSync(MEMORY_ARCHIVE_DIR, { recursive: true });
     fs.mkdirSync(MCP_DIR, { recursive: true });
 
     const IPC_SOCKET_PATH = process.env.KAIRO_IPC_SOCKET || path.join(runtimeDir, "kernel.sock");
@@ -52,13 +69,20 @@ async function bootstrap() {
     process.env.KAIRO_WS_TOKEN_FILE = TOKEN_FILE_PATH;
     process.env.KAIRO_PROJECT_ROOT = PROJECT_ROOT;
     process.env.KAIRO_WORKSPACE_DIR = WORKSPACE_DIR;
+    process.env.KAIRO_PERSIST_DIR = PERSIST_DIR;
+    process.env.KAIRO_MEMORY_DIR = MEMORY_DIR;
+    process.env.KAIRO_CHECKPOINT_DIR = CHECKPOINT_DIR;
+    process.env.KAIRO_MEMORY_ARCHIVE_DIR = MEMORY_ARCHIVE_DIR;
     process.env.KAIRO_SKILLS_DIR = SKILLS_DIR;
     process.env.KAIRO_MCP_DIR = MCP_DIR;
 
     console.log("[Config] Python Env:", PYTHON_ENV_DIR);
     console.log("[Config] Workspace:", WORKSPACE_DIR);
     console.log("[Config] Deliverables:", DELIVERABLES_DIR);
+    console.log("[Config] Persist:", PERSIST_DIR);
+    console.log("[Config] Memory:", MEMORY_DIR);
     console.log("[Config] Skills:", SKILLS_DIR);
+    console.log("[Config] Checkpoints:", CHECKPOINT_DIR);
     console.log("[Config] MCP:", MCP_DIR);
     console.log("[Config] Runtime:", runtimeDir);
 
@@ -85,7 +109,7 @@ async function bootstrap() {
     await app.use(new AIPlugin(providers));
 
     // Setup Memory (Markdown-based, no AI dependency for basic ops)
-    await app.use(new MemoryPlugin());
+    await app.use(new MemoryPlugin(MEMORY_DIR));
 
     // Setup Vault
     await app.use(new VaultPlugin());

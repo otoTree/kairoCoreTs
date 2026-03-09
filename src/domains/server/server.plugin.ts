@@ -6,7 +6,7 @@ import type { Context } from "hono";
 import type { WSContext } from "hono/ws";
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import type { ServerWebSocket } from "bun";
 import type { KairoEvent } from "../events/types";
 

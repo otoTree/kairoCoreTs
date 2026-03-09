@@ -1,7 +1,7 @@
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
 import { Vault } from "./vault";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 
 export class VaultPlugin implements Plugin {
   readonly name = "vault";

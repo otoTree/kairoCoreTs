@@ -28,7 +28,7 @@ export class InMemoryAgentMemory implements AgentMemory {
 
   constructor(limit: number = 50, private longTermMemory?: LongTermMemory) {
     this.limit = limit;
-    this.storageDir = path.join(process.cwd(), "memory");
+    this.storageDir = process.env.KAIRO_MEMORY_ARCHIVE_DIR || path.join(process.cwd(), "data", "memory", "archives");
     this.initStorage();
   }
 

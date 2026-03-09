@@ -16,7 +16,45 @@ export type {
 export { OpenAIProvider } from "./domains/ai/providers/openai";
 export { OllamaProvider } from "./domains/ai/providers/ollama";
 
-export { AgentPlugin } from "./domains/agent/agent.plugin";
+export {
+  AgentPlugin,
+  AgentRuntimeFactory,
+  AgentRuntime,
+  InMemoryAgentMemory,
+  AgentBootstrap,
+  AgentRouter,
+  CapabilityRegistry,
+  ReviewAgent,
+  TaskOrchestrator,
+  TaskStatus,
+  TaskType,
+  TaskAgentManager,
+  TaskAgentRuntimeAdapter,
+  CheckpointManager,
+  AgentTaskTools,
+} from "./domains/agent";
+export type {
+  AgentRuntimeFactoryOptions,
+  AgentRuntimeOptions,
+  SystemTool,
+  SystemToolContext,
+  VaultResolver,
+  AgentMemory,
+  LongTermMemory,
+  AgentDependencies,
+  AgentTaskSubsystem,
+  AgentRouterOptions,
+  AgentCapability,
+  ReviewRequest,
+  ReviewVerdict,
+  Task,
+  TaskEvent,
+  TaskAgentConfig,
+  TaskAgentState,
+  TaskAgentManagerOptions,
+  Checkpoint,
+  RegisterSystemTool,
+} from "./domains/agent";
 export { ServerPlugin } from "./domains/server/server.plugin";
 export { SandboxPlugin } from "./domains/sandbox/sandbox.plugin";
 export { MCPPlugin } from "./domains/mcp/mcp.plugin";

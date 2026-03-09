@@ -1,7 +1,7 @@
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import type { KernelPlugin } from "../kernel/kernel.plugin";
 import type { StateRepository } from "../database/repositories/state-repository";
-import type { SystemToolContext } from "../agent/runtime";
+import type { SystemToolContext } from "../agent";
 import { normalizeRepeat, resolveNextRun } from "./cron";
 import type { ProcessTask, ScheduledTask } from "./async-task.types";
 

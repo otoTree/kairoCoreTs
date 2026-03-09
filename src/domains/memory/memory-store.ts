@@ -1,5 +1,5 @@
 import { MemoryLayer, type MemoryEntry, type MemoryQuery, type MemoryResult } from "./types";
-import type { LongTermMemory } from "../agent/memory";
+import type { LongTermMemory } from "../agent";
 import type { AIPlugin } from "../ai/ai.plugin";
 import fs from "fs/promises";
 import { existsSync } from "fs";

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { InMemoryGlobalBus, RingBufferEventStore } from "../events";
-import { TaskOrchestrator } from "./task-orchestrator";
+import { InMemoryGlobalBus, RingBufferEventStore } from "../../events";
+import { TaskOrchestrator } from "../task";
 import { ReviewAgent } from "./review-agent";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";

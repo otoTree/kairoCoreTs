@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { CapabilityRegistry, type AgentCapability } from "./capability-registry";
+import { CapabilityRegistry, type AgentCapability } from "./collaboration";
 import { InMemorySharedMemory } from "./shared-memory";
 
 /**

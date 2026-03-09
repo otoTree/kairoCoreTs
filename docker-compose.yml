@@ -11,14 +11,17 @@ services:
       KAIRO_RUNTIME_DIR: /app/.run/kairo
       KAIRO_IPC_SOCKET: /app/.run/kairo/kernel.sock
       KAIRO_WS_TOKEN_FILE: /app/.run/kairo/ws.token
+      KAIRO_PERSIST_DIR: /app/data
+      KAIRO_MEMORY_DIR: /app/data/memory
+      KAIRO_MEMORY_ARCHIVE_DIR: /app/data/memory/archives
+      KAIRO_SKILLS_DIR: /app/data/skills
+      KAIRO_CHECKPOINT_DIR: /app/data/checkpoints
       PORT: 3000
     ports:
       - "3000:3000"
     volumes:
       - ./workspace:/app/workspace
       - ./deliverables:/app/deliverables
-      - ./memory:/app/memory
-      - ./data/memory:/app/data/memory
-      - ./data/sqlite:/app/data/sqlite
+      - ./data:/app/data
       - ./.run:/app/.run
     restart: unless-stopped

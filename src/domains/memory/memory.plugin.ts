@@ -1,7 +1,7 @@
 import type { Plugin } from "../../core/plugin";
 import type { Application } from "../../core/app";
 import type { AIPlugin } from "../ai/ai.plugin";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import { MemoryStore } from "./memory-store";
 import { MemoryLayer } from "./types";
 import path from "path";
@@ -18,7 +18,7 @@ export class MemoryPlugin implements Plugin {
 
   async setup(app: Application) {
     this.app = app;
-    const finalPath = this.storagePath || path.join(process.cwd(), "data", "memory");
+    const finalPath = this.storagePath || process.env.KAIRO_MEMORY_DIR || path.join(process.cwd(), "data", "memory");
 
     // AIPlugin 可选，用于 consolidate
     let ai: AIPlugin | undefined;

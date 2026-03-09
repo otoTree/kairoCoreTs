@@ -1,6 +1,6 @@
 import type { Plugin } from "../../core/plugin";
 import { Application } from "../../core/app";
-import { AgentPlugin } from "../agent/agent.plugin";
+import { AgentPlugin } from "../agent";
 import { SkillRegistry } from "./registry";
 import { SandboxManager } from "../sandbox/sandbox-manager";
 import type { SandboxRuntimeConfig } from "../sandbox/sandbox-config";

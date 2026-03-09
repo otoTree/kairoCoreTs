@@ -18,6 +18,7 @@ RUN apt-get update \
   && python3 -m venv /app/.python_env \
   && /app/.python_env/bin/pip install --no-cache-dir --upgrade pip setuptools wheel \
   && mkdir -p /app/.run/kairo \
+  && mkdir -p /app/data/memory/archives /app/data/skills /app/data/checkpoints /app/data/sqlite \
   && git config --global --add safe.directory /app \
   && git init /app \
   && rm -rf /var/lib/apt/lists/*
@@ -34,6 +35,11 @@ ENV PYTHON_ENV_PATH=/app/.python_env
 ENV PATH="/app/.python_env/bin:${PATH}"
 ENV KAIRO_RUNTIME_DIR=/app/.run/kairo
 ENV KAIRO_IPC_SOCKET=/app/.run/kairo/kernel.sock
+ENV KAIRO_PERSIST_DIR=/app/data
+ENV KAIRO_MEMORY_DIR=/app/data/memory
+ENV KAIRO_MEMORY_ARCHIVE_DIR=/app/data/memory/archives
+ENV KAIRO_SKILLS_DIR=/app/data/skills
+ENV KAIRO_CHECKPOINT_DIR=/app/data/checkpoints
 ENV PORT=3000
 
 EXPOSE 3000

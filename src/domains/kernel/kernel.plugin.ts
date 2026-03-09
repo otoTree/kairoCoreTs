@@ -6,7 +6,7 @@ import { ProcessManager } from "./process-manager";
 import { KernelEventBridge } from "./bridge";
 import { ShellManager } from "./terminal/shell";
 import { IPCServer } from "./ipc-server";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import { StateRepository } from "../database/repositories/state-repository";
 import { CheckpointRepository } from "../database/repositories/checkpoint-repository";
 import { KernelStateManager } from "./state-manager";
@@ -134,7 +134,9 @@ export class KernelPlugin implements Plugin {
         }
       }
     }, async (args) => {
-      const id = args.id || `term_${crypto.randomUUID().slice(0, 8)}`;
+      const id = typeof args.id === "string" && args.id.length > 0
+        ? args.id
+        : `term_${crypto.randomUUID().slice(0, 8)}`;
       this.shellManager.createSession(id);
       return { sessionId: id, status: "created" };
     });
@@ -153,16 +155,19 @@ export class KernelPlugin implements Plugin {
         required: ["sessionId", "command"]
       }
     }, async (args, context) => {
-      const session = this.shellManager.getSession(args.sessionId);
+      const sessionId = this.readString(args.sessionId, "sessionId");
+      const command = this.readString(args.command, "command");
+      const timeout = this.readOptionalNumber(args.timeout);
+      const session = this.shellManager.getSession(sessionId);
       if (!session) {
-        throw new Error(`Session ${args.sessionId} not found. Create one first.`);
+        throw new Error(`Session ${sessionId} not found. Create one first.`);
       }
       
       const env: Record<string, string> = {};
       if (context.traceId) env['KAIRO_TRACE_ID'] = context.traceId;
       if (context.spanId) env['KAIRO_SPAN_ID'] = context.spanId;
       
-      return await session.exec(args.command, { timeout: args.timeout, env });
+      return await session.exec(command, { timeout, env });
     });
 
     // 3. kairo_terminal_list
@@ -184,7 +189,7 @@ export class KernelPlugin implements Plugin {
         required: ["sessionId"]
       }
     }, async (args) => {
-      this.shellManager.killSession(args.sessionId);
+      this.shellManager.killSession(this.readString(args.sessionId, "sessionId"));
       return { status: "killed" };
     });
     
@@ -209,14 +214,18 @@ export class KernelPlugin implements Plugin {
       },
     }, async (args) => {
       const workspaceRoot = process.env.KAIRO_WORKSPACE_DIR || process.cwd();
+      const filePath = this.readString(args.filePath, "filePath");
+      const startLine = this.readNumber(args.startLine, "startLine");
+      const endLine = this.readNumber(args.endLine, "endLine");
+      const replacement = this.readString(args.replacement, "replacement");
       return await applyLinePatch({
         workspaceRoot,
-        filePath: args.filePath,
-        startLine: args.startLine,
-        endLine: args.endLine,
-        replacement: args.replacement,
-        expectedOriginal: args.expectedOriginal,
-        dryRun: args.dryRun,
+        filePath,
+        startLine,
+        endLine,
+        replacement,
+        expectedOriginal: this.readOptionalString(args.expectedOriginal),
+        dryRun: this.readOptionalBoolean(args.dryRun),
       });
     });
 
@@ -264,8 +273,10 @@ export class KernelPlugin implements Plugin {
         required: ["processId", "data"]
       }
     }, async (args) => {
-      this.processManager.writeToStdin(args.processId, args.data);
-      return { status: "written", processId: args.processId };
+      const processId = this.readString(args.processId, "processId");
+      const data = this.readString(args.data, "data");
+      this.processManager.writeToStdin(processId, data);
+      return { status: "written", processId };
     });
 
     // kairo_process_status — 查询进程状态
@@ -280,7 +291,7 @@ export class KernelPlugin implements Plugin {
         required: ["processId"]
       }
     }, async (args) => {
-      return this.processManager.getStatus(args.processId);
+      return this.processManager.getStatus(this.readString(args.processId, "processId"));
     });
 
     // kairo_process_wait — 等待进程退出
@@ -295,8 +306,9 @@ export class KernelPlugin implements Plugin {
         required: ["processId"]
       }
     }, async (args) => {
-      const exitCode = await this.processManager.wait(args.processId);
-      return { exitCode, processId: args.processId };
+      const processId = this.readString(args.processId, "processId");
+      const exitCode = await this.processManager.wait(processId);
+      return { exitCode, processId };
     });
 
     rootLogger.info("[Kernel] Registered Process IO Tools");
@@ -323,8 +335,9 @@ export class KernelPlugin implements Plugin {
         required: ["serviceId"],
       },
     }, async (args) => {
-      await this.serviceManager.restartService(args.serviceId);
-      return { status: "restarted", serviceId: args.serviceId };
+      const serviceId = this.readString(args.serviceId, "serviceId");
+      await this.serviceManager.restartService(serviceId);
+      return { status: "restarted", serviceId };
     });
 
     rootLogger.info("[Kernel] Registered Service Management Tools");
@@ -343,7 +356,7 @@ export class KernelPlugin implements Plugin {
         required: ["unitName"],
       },
     }, async (args) => {
-      return await this.dbusBridge.getUnitStatus(args.unitName);
+      return await this.dbusBridge.getUnitStatus(this.readString(args.unitName, "unitName"));
     });
 
     agent.registerSystemTool({
@@ -358,11 +371,13 @@ export class KernelPlugin implements Plugin {
         required: ["unitName", "action"],
       },
     }, async (args) => {
-      switch (args.action) {
-        case 'start': return await this.dbusBridge.startUnit(args.unitName);
-        case 'stop': return await this.dbusBridge.stopUnit(args.unitName);
-        case 'restart': return await this.dbusBridge.restartUnit(args.unitName);
-        default: throw new Error(`未知操作: ${args.action}`);
+      const unitName = this.readString(args.unitName, "unitName");
+      const action = this.readString(args.action, "action");
+      switch (action) {
+        case 'start': return await this.dbusBridge.startUnit(unitName);
+        case 'stop': return await this.dbusBridge.stopUnit(unitName);
+        case 'restart': return await this.dbusBridge.restartUnit(unitName);
+        default: throw new Error(`未知操作: ${action}`);
       }
     });
 
@@ -375,5 +390,28 @@ export class KernelPlugin implements Plugin {
     });
 
     rootLogger.info("[Kernel] Registered D-Bus Tools");
+  }
+
+  private readString(value: unknown, field: string): string {
+    if (typeof value === "string") return value;
+    throw new Error(`${field} must be a string`);
+  }
+
+  private readOptionalString(value: unknown): string | undefined {
+    return typeof value === "string" ? value : undefined;
+  }
+
+  private readNumber(value: unknown, field: string): number {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    throw new Error(`${field} must be a number`);
+  }
+
+  private readOptionalNumber(value: unknown): number | undefined {
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    return undefined;
+  }
+
+  private readOptionalBoolean(value: unknown): boolean | undefined {
+    return typeof value === "boolean" ? value : undefined;
   }
 }

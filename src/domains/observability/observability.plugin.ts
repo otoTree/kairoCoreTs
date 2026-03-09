@@ -3,7 +3,7 @@ import type { Application } from "../../core/app";
 import type { LogEntry } from "./types";
 import { KairoLogger } from "./logger";
 import type { KairoEvent } from "../events";
-import type { AgentPlugin } from "../agent/agent.plugin";
+import type { AgentPlugin } from "../agent";
 import type { KernelPlugin } from "../kernel/kernel.plugin";
 import fs from "fs/promises";
 import path from "path";

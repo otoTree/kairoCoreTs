@@ -23,7 +23,7 @@ pnpm-debug.log*
 workspace
 deliverables
 memory
-data/memory
+data
 .run
 
 *.db
