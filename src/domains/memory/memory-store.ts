@@ -82,7 +82,7 @@ export class MemoryStore implements LongTermMemory {
     const block = this.serializeEntry(entry);
 
     if (!existsSync(filePath)) {
-      await fs.writeFile(filePath, `# ${LAYER_TITLES[layer]}\n\n${block}`, "utf-8");
+      await fs.appendFile(filePath, `# ${LAYER_TITLES[layer]}\n\n${block}`, "utf-8");
     } else {
       await fs.appendFile(filePath, block, "utf-8");
     }

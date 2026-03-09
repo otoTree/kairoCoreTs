@@ -1,9 +1,13 @@
 import { describe, it, expect, mock, beforeEach } from "bun:test";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { AgentRuntime } from "./runtime";
 import { InMemoryGlobalBus, RingBufferEventStore } from "../events";
 import { InMemoryAgentMemory, type AgentMemory } from "./memory";
 import type { AIPlugin } from "../ai/ai.plugin";
 import type { AIProvider } from "../ai/types";
+import { MemoryStore } from "../memory/memory-store";
 
 // Mock AI Provider
 const mockChat = mock(async () => ({
@@ -607,6 +611,67 @@ describe("AgentRuntime (Event Driven)", () => {
     } finally {
       runtimeWithPeriodicMemorize.stop();
       process.env.KAIRO_MEMORY_MEMORIZE_INTERVAL_TICKS = previousInterval;
+    }
+  });
+
+  it("should append every tick snapshot into daily work log file", async () => {
+    const previousArchiveDir = process.env.KAIRO_MEMORY_ARCHIVE_DIR;
+    const archiveDir = await mkdtemp(join(tmpdir(), "kairo-work-log-"));
+    process.env.KAIRO_MEMORY_ARCHIVE_DIR = archiveDir;
+    const runtimeWithFileMemory = new AgentRuntime({
+      ai: mockAI,
+      bus,
+      memory: new InMemoryAgentMemory(),
+    });
+
+    try {
+      runtimeWithFileMemory.start();
+      await bus.publish({
+        type: `kairo.agent.${runtimeWithFileMemory.id}.message`,
+        source: "user",
+        data: { content: "第一条 tick" }
+      });
+      await new Promise(resolve => setTimeout(resolve, 80));
+
+      await bus.publish({
+        type: `kairo.agent.${runtimeWithFileMemory.id}.message`,
+        source: "user",
+        data: { content: "第二条 tick" }
+      });
+      await new Promise(resolve => setTimeout(resolve, 80));
+
+      const date = new Date().toISOString().slice(0, 10);
+      const workLogPath = join(archiveDir, `${date}-work.md`);
+      const content = await readFile(workLogPath, "utf-8");
+      expect(content).toContain(`# ${date}-work`);
+      expect((content.match(/<!-- tick:/g) || []).length).toBeGreaterThanOrEqual(2);
+      expect((content.match(/Observation:/g) || []).length).toBeGreaterThanOrEqual(2);
+      expect((content.match(/Thought:/g) || []).length).toBeGreaterThanOrEqual(2);
+      expect((content.match(/Action:/g) || []).length).toBeGreaterThanOrEqual(2);
+    } finally {
+      runtimeWithFileMemory.stop();
+      process.env.KAIRO_MEMORY_ARCHIVE_DIR = previousArchiveDir;
+      await rm(archiveDir, { recursive: true, force: true });
+    }
+  });
+
+  it("should append long-term memory content without overwriting file", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "kairo-memory-store-"));
+    const store = new MemoryStore(memoryDir);
+    await store.init();
+
+    try {
+      await store.memorize("first memory line");
+      await store.memorize("second memory line");
+
+      const episodicPath = join(memoryDir, "default", "episodic.md");
+      const content = await readFile(episodicPath, "utf-8");
+      expect(content).toContain("# Episodic Memory (情景记忆)");
+      expect(content).toContain("first memory line");
+      expect(content).toContain("second memory line");
+      expect((content.match(/<!-- id:/g) || []).length).toBe(2);
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
     }
   });
 });

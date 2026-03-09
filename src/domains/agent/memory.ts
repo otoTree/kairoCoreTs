@@ -25,11 +25,13 @@ export class InMemoryAgentMemory implements AgentMemory {
   private summary: string = "";
   private readonly limit: number;
   private readonly storageDir: string;
+  private readonly storageReady: Promise<void>;
+  private workLogWriteChain: Promise<void> = Promise.resolve();
 
   constructor(limit: number = 50, private longTermMemory?: LongTermMemory) {
     this.limit = limit;
     this.storageDir = process.env.KAIRO_MEMORY_ARCHIVE_DIR || path.join(process.cwd(), "data", "memory", "archives");
-    this.initStorage();
+    this.storageReady = this.initStorage();
   }
 
   async recall(query: string): Promise<string[]> {
@@ -89,10 +91,10 @@ export class InMemoryAgentMemory implements AgentMemory {
 
   update(params: { observation: string; thought: string; action: string; actionResult?: string }) {
     this.history.push(params);
-    // Hard limit just in case, though compression should handle it
     if (this.history.length > this.limit) {
       this.history.shift(); 
     }
+    this.persistWorkTick(params);
   }
 
   async compress(ai: AIPlugin) {
@@ -126,6 +128,7 @@ ${contextToSummarize}
 Summary:`;
 
     try {
+      await this.storageReady;
       const response = await ai.chat([
         { role: "system", content: "You are a helpful assistant that summarizes text." },
         { role: "user", content: prompt }
@@ -148,5 +151,32 @@ Summary:`;
     } catch (e) {
       console.error("[Memory] Compression failed:", e);
     }
+  }
+
+  private persistWorkTick(params: { observation: string; thought: string; action: string; actionResult?: string }) {
+    const timestamp = new Date().toISOString();
+    const date = timestamp.slice(0, 10);
+    const filePath = path.join(this.storageDir, `${date}-work.md`);
+    const header = `# ${date}-work\n\n`;
+    const block = this.formatTickBlock(params, timestamp);
+
+    this.workLogWriteChain = this.workLogWriteChain
+      .then(async () => {
+        await this.storageReady;
+        let contentToAppend = block;
+        try {
+          await fs.access(filePath);
+        } catch {
+          contentToAppend = header + block;
+        }
+        await fs.appendFile(filePath, contentToAppend, "utf-8");
+      })
+      .catch((error) => {
+        console.error("[Memory] Failed to append work log:", error);
+      });
+  }
+
+  private formatTickBlock(params: { observation: string; thought: string; action: string; actionResult?: string }, timestamp: string): string {
+    return `---\n<!-- tick:${timestamp} -->\nObservation: ${params.observation}\nThought: ${params.thought}\nAction: ${params.action}${params.actionResult ? `\nResult: ${params.actionResult}` : ""}\n`;
   }
 }
