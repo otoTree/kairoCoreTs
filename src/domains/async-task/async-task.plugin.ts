@@ -3,11 +3,13 @@ import type { Application } from "../../core/app";
 import type { AgentPlugin } from "../agent";
 import type { KernelPlugin } from "../kernel/kernel.plugin";
 import { AsyncTaskService } from "./async-task.service";
+import { ScriptTaskService } from "./script-task.service";
 
 export class AsyncTaskPlugin implements Plugin {
   name = "async-task";
   private app?: Application;
   private service?: AsyncTaskService;
+  private scriptTaskService?: ScriptTaskService;
 
   setup(app: Application) {
     this.app = app;
@@ -34,10 +36,13 @@ export class AsyncTaskPlugin implements Plugin {
 
     this.service = new AsyncTaskService(agent, kernel, kernel?.stateRepository);
     await this.service.start();
+    this.scriptTaskService = new ScriptTaskService(agent, kernel, kernel?.stateRepository);
+    await this.scriptTaskService.start();
     console.log("[AsyncTask] Async task domain started.");
   }
 
   async stop() {
     this.service?.stop();
+    this.scriptTaskService?.stop();
   }
 }
